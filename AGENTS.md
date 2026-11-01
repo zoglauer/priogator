@@ -157,7 +157,9 @@ version without regenerating.
    `.github/release-notes.md`.
 
 The app is ad-hoc signed, not notarized: downloaders need "Open Anyway" or
-`xattr -dr com.apple.quarantine`. Notarization would need an Apple
+`xattr -dr com.apple.quarantine`. The DMG contains "Read Me First.txt"
+(from `assets/dmg-read-me-first.txt`) explaining install and first start;
+keep it and `.github/release-notes.md` in line. Notarization would need an Apple
 Developer ID. Bundle id: `com.andreaszoglauer.priogator`.
 
 ## Open ideas (not started)

@@ -68,6 +68,7 @@ if [[ "$mode" == "--release" ]]; then
     staging=$(mktemp -d)
     cp -R "$app" "$staging/"
     ln -s /Applications "$staging/Applications"
+    cp assets/dmg-read-me-first.txt "$staging/Read Me First.txt"
     rm -f "$dmg"
     hdiutil create -volname "Priogator $version" -srcfolder "$staging" \
         -ov -format UDZO "$dmg" >/dev/null
