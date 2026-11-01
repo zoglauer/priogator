@@ -24,7 +24,12 @@ pub fn fill(board: &mut Board, today: Date) {
 
     board.add_task(work, "Send quarterly report", Some(admin), in_days(-1));
     board.add_task(work, "Proposal for Müller GmbH", Some(clients), in_days(3));
-    let workshop = board.add_task(work, "Prepare kick-off workshop", Some(clients), None);
+    let workshop = board.add_task(
+        work,
+        "Prepare kick-off workshop",
+        Some(clients),
+        in_days(24),
+    );
     let room = board.add_subtask(workshop, "Book a room");
     board.set_subtask_done(workshop, room, true);
     board.add_subtask(workshop, "Send invitations");

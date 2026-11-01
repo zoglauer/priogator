@@ -82,6 +82,8 @@ Written in Rust with egui; runs on macOS and Linux.
     APP_PREVIEW=/tmp/app cargo test app_preview -- --ignored
                          # screenshots of the window with example data (light + dark)
     cargo build --release
+    scripts/release.sh   # new version: bump x.y.z → x.y.(z+1), commit, tag, push;
+                         # GitHub then builds the DMG (also: minor, major)
     scripts/licenses.sh  # after changing dependencies: update the list of
                          # library licenses shown under About → Acknowledgements
                          # (needs: cargo install --locked cargo-about --features cli)

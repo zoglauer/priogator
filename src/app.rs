@@ -1175,9 +1175,20 @@ impl PriogatorApp {
                             rect
                         });
                         let mut title_left = None;
+                        // With a deadline as well, the subtask count goes below the
+                        // date, so the title keeps its width.
+                        let own_subtask_row =
+                            !task.subtasks.is_empty() && task.deadline.is_some() && !task.done;
                         // One row, everything centred on it: checkbox, title,
-                        // and the labels on the right.
-                        ui.horizontal(|ui| {
+                        // and the labels on the right. With the subtask count below
+                        // the date, the row is top-aligned instead, so the checkbox
+                        // and the title's first line stay level with the date.
+                        let align = if own_subtask_row {
+                            egui::Align::Min
+                        } else {
+                            egui::Align::Center
+                        };
+                        let row = |ui: &mut egui::Ui| {
                             let mut done = task.done;
                             let checkbox = ui.add(egui::Checkbox::without_text(&mut done));
                             // Name it after the task, for VoiceOver.
@@ -1203,9 +1214,8 @@ impl PriogatorApp {
                             };
                             // Labels on the right first, so a long title wraps in
                             // the space left over instead of running under them.
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
+                            ui.with_layout(egui::Layout::right_to_left(align), |ui| {
+                                let flags = |ui: &mut egui::Ui| {
                                     if let Some(deadline) = task.deadline
                                         && !task.done
                                     {
@@ -1217,21 +1227,59 @@ impl PriogatorApp {
                                         ui.label(RichText::new("↻").weak())
                                             .on_hover_text(repeat.summary());
                                     }
+                                };
+                                if own_subtask_row {
+                                    // Date above the subtask count, both beside
+                                    // the title.
+                                    ui.with_layout(
+                                        egui::Layout::top_down(egui::Align::Max),
+                                        |ui| {
+                                            ui.spacing_mut().item_spacing.y = 2.0;
+                                            let line = egui::vec2(
+                                                ui.available_width(),
+                                                ui.spacing().interact_size.y,
+                                            );
+                                            ui.allocate_ui_with_layout(
+                                                line,
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                flags,
+                                            );
+                                            if subtask_toggle(ui, &task.subtasks, expanded) {
+                                                pass.actions.push(Action::ToggleSubtasks(id));
+                                            }
+                                        },
+                                    );
+                                } else {
+                                    flags(ui);
                                     if !task.subtasks.is_empty()
                                         && subtask_toggle(ui, &task.subtasks, expanded)
                                     {
                                         pass.actions.push(Action::ToggleSubtasks(id));
                                     }
-                                    ui.with_layout(
-                                        egui::Layout::left_to_right(egui::Align::Center),
-                                        |ui| {
+                                }
+                                ui.with_layout(egui::Layout::left_to_right(align), |ui| {
+                                    if own_subtask_row {
+                                        // Centre the first line on the checkbox.
+                                        let pad = (ui.spacing().interact_size.y
+                                            - ui.text_style_height(&egui::TextStyle::Body))
+                                            / 2.0;
+                                        ui.vertical(|ui| {
+                                            ui.add_space(pad.max(0.0));
                                             let title = ui.add(egui::Label::new(title).wrap());
                                             title_left = Some(title.rect.left());
-                                        },
-                                    );
-                                },
-                            );
-                        });
+                                        });
+                                    } else {
+                                        let title = ui.add(egui::Label::new(title).wrap());
+                                        title_left = Some(title.rect.left());
+                                    }
+                                });
+                            });
+                        };
+                        if own_subtask_row {
+                            ui.horizontal_top(row);
+                        } else {
+                            ui.horizontal(row);
+                        }
                         if let (Some(group), Some(line), Some(left)) =
                             (group, group_line, title_left)
                         {
@@ -3466,7 +3514,9 @@ mod tests {
                 harness.get_by_label_contains("MIT License ·").click();
                 harness.run_steps(4);
                 let image = harness.render().expect("render");
-                image.save(format!("{prefix}-about-thanks-open.png")).expect("save");
+                image
+                    .save(format!("{prefix}-about-thanks-open.png"))
+                    .expect("save");
                 harness.state_mut().about_page = AboutPage::Main;
 
                 // An area with more groups than fit on one line.

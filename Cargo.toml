@@ -1,8 +1,8 @@
 [package]
 name = "priogator"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
-description = "Priority tracker"
+description = "A priority tracker"
 authors = ["Andreas Zoglauer"]
 license = "Apache-2.0"
 repository = "https://github.com/zoglauer/priogator"

@@ -149,12 +149,15 @@ version without regenerating.
 
 ## Releasing
 
-1. Bump `version` in `Cargo.toml` (About shows it; the macOS bundle uses it).
-2. `cargo test`, `cargo clippy --all-targets`, `scripts/licenses.sh`.
-3. Commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`.
-4. GitHub Actions (`release.yml`, macOS runner) tests, builds the universal
-   `Priogator-X.Y.Z.dmg` and attaches it to the release, using
-   `.github/release-notes.md`.
+The owner runs `scripts/release.sh` (`minor` / `major` as argument for
+bigger steps). It checks the branch and remote, runs tests and clippy,
+bumps `version` in `Cargo.toml` (and `Cargo.lock`), refreshes the license
+list, commits "Priogator X.Y.Z", tags `vX.Y.Z` and, after asking, pushes.
+Agents don't run it unless asked.
+
+The tag push starts GitHub Actions (`release.yml`, macOS runner): tests,
+universal `Priogator-X.Y.Z.dmg`, attached to the release with
+`.github/release-notes.md`.
 
 The app is ad-hoc signed, not notarized: downloaders need "Open Anyway" or
 `xattr -dr com.apple.quarantine`. The DMG contains "Read Me First.txt"
