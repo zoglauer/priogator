@@ -1,0 +1,44 @@
+# On a tag like v1.2.3: build a universal macOS app, pack it into a DMG and
+# attach it to a GitHub release for that tag.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test
+
+      - name: Build DMG
+        run: VERSION="${GITHUB_REF_NAME#v}" scripts/bundle-macos.sh --release
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dmg="target/release/Priogator-${GITHUB_REF_NAME#v}.dmg"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$dmg" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$dmg" \
+              --title "Priogator ${GITHUB_REF_NAME#v}" \
+              --notes-file .github/release-notes.md
+          fi

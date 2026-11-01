@@ -2909,8 +2909,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
 
 [[package]]
-name = "prioritizer"
-version = "0.1.0"
+name = "priogator"
+version = "1.0.0"
 dependencies = [
  "directories",
  "eframe",
@@ -2920,6 +2920,9 @@ dependencies = [
  "fontique",
  "hostname",
  "jiff",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "rfd",
  "serde",
  "serde_json",

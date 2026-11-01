@@ -1,19 +1,33 @@
 #!/usr/bin/env bash
-# Build Prioritizer.app in target/release/.
+# Build Priogator.app in target/release/.
 #   scripts/bundle-macos.sh            build only
 #   scripts/bundle-macos.sh --install  also copy it to ~/Applications
+#   scripts/bundle-macos.sh --release  universal app (Apple Silicon + Intel)
+#                                      packed into target/release/Priogator-<version>.dmg
+# VERSION=1.2.3 overrides the version from Cargo.toml.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # rustup puts cargo here; not every shell has it on PATH.
 command -v cargo >/dev/null || source "$HOME/.cargo/env"
 
-cargo build --release
-
-version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-app=target/release/Prioritizer.app
+mode=${1:-}
+version=${VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)}
+app=target/release/Priogator.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp target/release/prioritizer "$app/Contents/MacOS/Prioritizer"
+
+if [[ "$mode" == "--release" ]]; then
+    targets=(aarch64-apple-darwin x86_64-apple-darwin)
+    for t in "${targets[@]}"; do
+        cargo build --release --target "$t"
+    done
+    lipo -create -output "$app/Contents/MacOS/Priogator" \
+        target/aarch64-apple-darwin/release/priogator \
+        target/x86_64-apple-darwin/release/priogator
+else
+    cargo build --release
+    cp target/release/priogator "$app/Contents/MacOS/Priogator"
+fi
 
 # Icon: render all sizes macOS wants from the 1024 px PNG.
 iconset=$(mktemp -d)/AppIcon.iconset
@@ -31,10 +45,10 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Prioritizer</string>
-    <key>CFBundleDisplayName</key><string>Prioritizer</string>
-    <key>CFBundleIdentifier</key><string>local.prioritizer</string>
-    <key>CFBundleExecutable</key><string>Prioritizer</string>
+    <key>CFBundleName</key><string>Priogator</string>
+    <key>CFBundleDisplayName</key><string>Priogator</string>
+    <key>CFBundleIdentifier</key><string>com.andreaszoglauer.priogator</string>
+    <key>CFBundleExecutable</key><string>Priogator</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$version</string>
@@ -49,9 +63,21 @@ PLIST
 codesign --force --sign - "$app"
 echo "Built $app"
 
-if [[ "${1:-}" == "--install" ]]; then
+if [[ "$mode" == "--release" ]]; then
+    dmg=target/release/Priogator-$version.dmg
+    staging=$(mktemp -d)
+    cp -R "$app" "$staging/"
+    ln -s /Applications "$staging/Applications"
+    rm -f "$dmg"
+    hdiutil create -volname "Priogator $version" -srcfolder "$staging" \
+        -ov -format UDZO "$dmg" >/dev/null
+    rm -rf "$staging"
+    echo "Built $dmg"
+fi
+
+if [[ "$mode" == "--install" ]]; then
     mkdir -p "$HOME/Applications"
-    rm -rf "$HOME/Applications/Prioritizer.app"
+    rm -rf "$HOME/Applications/Priogator.app"
     cp -R "$app" "$HOME/Applications/"
-    echo "Installed to ~/Applications/Prioritizer.app"
+    echo "Installed to ~/Applications/Priogator.app"
 fi

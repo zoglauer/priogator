@@ -1,6 +1,6 @@
-# Prioritizer Help
+# Priogator Help
 
-Prioritizer is a to-do list organised in **areas**, one for each part of
+Priogator is a to-do list organised in **areas**, one for each part of
 your life: work, private ventures, house, family, or whatever you need. Each
 area is shown as a column. Within an area you
 decide the order of your tasks and change it whenever priorities shift.
@@ -30,7 +30,10 @@ On Linux, use **Ctrl** wherever this guide says **⌘**.
   file couldn't be read. Hover for details; click to dismiss.
 - **Undo ↶ / redo ↷** and the **menu ☰** on the right. The menu has
   **New task…** (⌘N), **Settings…** (⌘,), **Backups…**, **Keyboard
-  shortcuts** and **About Prioritizer**.
+  shortcuts** and **About Priogator**. About shows the version, the
+  **License** (Apache 2.0) and **Acknowledgements**: thanks to the
+  open-source projects Priogator is built on, with every library's license.
+  On macOS, **Priogator → About Priogator** in the menu bar opens it too.
 
 **Areas (below the toolbar)**
 
@@ -294,7 +297,7 @@ open tasks and, in red, how many are overdue, so nothing urgent can hide.
 - **Automatic:** areas fold and unfold by themselves when the app starts and
   whenever their active time begins or ends.
 - **Peek in:** click a folded strip to open the area. It folds again as soon
-  as the Prioritizer window loses focus (you switch to another app or the
+  as the Priogator window loses focus (you switch to another app or the
   screen locks), unless its active time has begun by then.
 - **Drop a task on a strip** to move it into that area; it goes to the bottom
   of the area's priority list. Right-click a strip for the area's menu.
@@ -317,7 +320,7 @@ there.
 
 ## Backups
 
-Prioritizer backs everything up once a day: when it starts, and again after
+Priogator backs everything up once a day: when it starts, and again after
 midnight if it's still running. Old backups are thinned out automatically:
 
 | Age | Kept |
@@ -340,7 +343,7 @@ Backups stay on each computer and are not synced.
 - **Back up now** makes an extra backup immediately.
 - **Show folder** opens the backup folder.
 
-Before restoring, Prioritizer saves the current state as an extra backup.
+Before restoring, Priogator saves the current state as an extra backup.
 ⌘Z undoes a restore. The restored state also reaches your other computer at
 the next sync, like any other change.
 
@@ -348,7 +351,7 @@ the next sync, like any other change.
 
 ## Using two computers
 
-Prioritizer can keep a Mac and a Linux laptop in sync without any online
+Priogator can keep a Mac and a Linux laptop in sync without any online
 service.
 
 - Each computer writes its own file, `device-<name>.json`, into the **sync
@@ -367,8 +370,8 @@ You only have to keep the sync folder the same on both computers:
 
 The sync folder is:
 
-- macOS: `~/Library/Application Support/Prioritizer/sync`
-- Linux: `~/.local/share/prioritizer/sync`
+- macOS: `~/Library/Application Support/Priogator/sync`
+- Linux: `~/.local/share/priogator/sync`
 
 ---
 
@@ -386,8 +389,8 @@ The sync folder is:
 
 All settings are stored in `config.json`:
 
-- macOS: `~/Library/Application Support/Prioritizer/config.json`
-- Linux: `~/.config/prioritizer/config.json`
+- macOS: `~/Library/Application Support/Priogator/config.json`
+- Linux: `~/.config/priogator/config.json`
 
 | Setting | Meaning |
 | --- | --- |
@@ -398,8 +401,13 @@ All settings are stored in `config.json`:
 | `done_days` | how long done tasks stay visible (also in Settings) |
 | `column_width` | width of each area in pixels (also in Settings) |
 
-Quit Prioritizer before editing the file by hand, and start it again
+Quit Priogator before editing the file by hand, and start it again
 afterwards. Give each computer its own `device` name.
+
+Priogator used to be called Prioritizer. On its first start it moves
+everything from the old `Prioritizer` folders (settings, sync folder,
+backups) into the new `Priogator` ones and updates the settings to match.
+If you sync with Syncthing, point its shared folder to the new path.
 
 ---
 

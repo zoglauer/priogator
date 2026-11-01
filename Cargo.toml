@@ -1,7 +1,11 @@
 [package]
-name = "prioritizer"
-version = "0.1.0"
+name = "priogator"
+version = "1.0.0"
 edition = "2024"
+description = "Priority tracker"
+authors = ["Andreas Zoglauer"]
+license = "Apache-2.0"
+repository = "https://github.com/zoglauer/priogator"
 
 [dependencies]
 directories = "6.0.0"
@@ -19,3 +23,8 @@ uuid = { version = "1.29.0", features = ["v4", "serde", "v5"] }
 egui_kittest = { version = "0.37", features = ["wgpu", "snapshot", "eframe"] }
 egui_system_font_provider = "0.37.0"
 tempfile = "3.27.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSMenu", "NSMenuItem", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray"] }

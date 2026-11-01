@@ -75,8 +75,31 @@ struct DeviceFile {
 }
 
 fn project_dirs() -> io::Result<directories::ProjectDirs> {
-    directories::ProjectDirs::from("", "", "Prioritizer")
+    directories::ProjectDirs::from("", "", "Priogator")
         .ok_or_else(|| io::Error::other("no home directory found"))
+}
+
+/// The app used to be called Prioritizer: move its folders over, entry by
+/// entry, and leave anything already in the new folder alone.
+fn move_folder(old: &Path, new: &Path) -> io::Result<()> {
+    let Ok(entries) = fs::read_dir(old) else {
+        return Ok(());
+    };
+    fs::create_dir_all(new)?;
+    for entry in entries.flatten() {
+        let target = new.join(entry.file_name());
+        if !target.exists() {
+            fs::rename(entry.path(), target)?;
+        }
+    }
+    // Only goes if it is empty now.
+    let _ = fs::remove_dir(old);
+    Ok(())
+}
+
+/// `path` with the `old` folder at its start replaced by `new`.
+fn rebase(path: &Path, old: &Path, new: &Path) -> Option<PathBuf> {
+    path.strip_prefix(old).ok().map(|rest| new.join(rest))
 }
 
 impl Config {
@@ -84,9 +107,24 @@ impl Config {
     pub fn load_or_create() -> io::Result<Self> {
         let dirs = project_dirs()?;
         let file = dirs.config_dir().join("config.json");
+        let old = directories::ProjectDirs::from("", "", "Prioritizer");
+        if let Some(old) = &old {
+            move_folder(old.config_dir(), dirs.config_dir())?;
+            move_folder(old.data_dir(), dirs.data_dir())?;
+        }
         if let Ok(text) = fs::read_to_string(&file) {
             let mut config: Config = serde_json::from_str(&text).map_err(io::Error::other)?;
             config.file = Some(file);
+            if let Some(old) = &old {
+                let moved = |p: &Path| rebase(p, old.data_dir(), dirs.data_dir());
+                let sync = moved(&config.sync_dir);
+                let backup = moved(&config.backup_dir);
+                if sync.is_some() || backup.is_some() {
+                    config.sync_dir = sync.unwrap_or(config.sync_dir);
+                    config.backup_dir = backup.unwrap_or(config.backup_dir);
+                    config.save()?;
+                }
+            }
             return Ok(config);
         }
         let config = Config {
@@ -248,7 +286,7 @@ fn read_device_file(path: &Path) -> io::Result<DeviceFile> {
     let file: DeviceFile = serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)?;
     if file.format > FORMAT_VERSION {
         return Err(io::Error::other(format!(
-            "written by a newer Prioritizer (format {})",
+            "written by a newer Priogator (format {})",
             file.format
         )));
     }
@@ -344,5 +382,29 @@ mod tests {
         let mut folder = SyncFolder::new(dir.path(), "mac");
         let (_, errors) = folder.load();
         assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn old_folders_move_over() {
+        let home = tempfile::tempdir().unwrap();
+        let old = home.path().join("Prioritizer");
+        let new = home.path().join("Priogator");
+        fs::create_dir_all(old.join("sync")).unwrap();
+        fs::write(old.join("sync/device-mac.json"), "{}").unwrap();
+        fs::write(old.join("config.json"), "old").unwrap();
+        fs::create_dir_all(&new).unwrap();
+        fs::write(new.join("config.json"), "new").unwrap();
+
+        move_folder(&old, &new).unwrap();
+        assert!(new.join("sync/device-mac.json").exists());
+        assert_eq!(fs::read_to_string(new.join("config.json")).unwrap(), "new");
+        // The old config was not moved, so the old folder stays.
+        assert!(old.join("config.json").exists());
+
+        assert_eq!(
+            rebase(&old.join("sync"), &old, &new),
+            Some(new.join("sync"))
+        );
+        assert_eq!(rebase(Path::new("/elsewhere"), &old, &new), None);
     }
 }

@@ -145,7 +145,7 @@ enum BackupAction {
     Delete,
 }
 
-pub struct PrioritizerApp {
+pub struct PriogatorApp {
     board: Board,
     folder: SyncFolder,
     /// Local changes not yet written to disk.
@@ -177,9 +177,86 @@ pub struct PrioritizerApp {
     last_backup: Option<Date>,
     backups_dialog: Option<BackupsDialog>,
     about_open: bool,
+    about_page: AboutPage,
     settings_open: bool,
     shortcuts_open: bool,
 }
+
+/// Back on the left, Close on the right.
+fn about_footer(ui: &mut egui::Ui, page: &mut AboutPage, close: &mut bool) {
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        if ui.button("‹ Back").clicked() {
+            *page = AboutPage::Main;
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            *close = ui.button("Close").clicked();
+        });
+    });
+}
+
+/// What the About dialog shows.
+#[derive(Clone, Copy, PartialEq)]
+enum AboutPage {
+    Main,
+    License,
+    Acknowledgements,
+}
+
+/// The projects Priogator is built on most directly, with the people behind
+/// them as they name themselves.
+const THANKS: [(&str, &str, &str); 10] = [
+    (
+        "egui & eframe",
+        "Emil Ernerfeldt and contributors",
+        "https://github.com/emilk/egui",
+    ),
+    (
+        "jiff",
+        "Andrew Gallant",
+        "https://github.com/BurntSushi/jiff",
+    ),
+    (
+        "serde",
+        "Erick Tryzelaar, David Tolnay and contributors",
+        "https://github.com/serde-rs/serde",
+    ),
+    (
+        "winit",
+        "The winit contributors",
+        "https://github.com/rust-windowing/winit",
+    ),
+    (
+        "wgpu & glow",
+        "The gfx-rs developers, Joshua Groves, Dzmitry Malyshau",
+        "https://github.com/gfx-rs/wgpu",
+    ),
+    (
+        "fontique & parley",
+        "The Linebender community",
+        "https://github.com/linebender/parley",
+    ),
+    (
+        "rfd",
+        "Bartłomiej Maryńczak",
+        "https://github.com/PolyMeilex/rfd",
+    ),
+    (
+        "uuid",
+        "Ashley Mannix, Dylan DPC, Hunar Roop Kahlon",
+        "https://github.com/uuid-rs/uuid",
+    ),
+    (
+        "directories",
+        "Simon Ochsenreither",
+        "https://github.com/soc/directories-rs",
+    ),
+    (
+        "objc2",
+        "Mads Marquart, Steven Sheldon",
+        "https://github.com/madsmtm/objc2",
+    ),
+];
 
 fn today() -> Date {
     jiff::Zoned::now().date()
@@ -189,7 +266,7 @@ fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
 }
 
-impl PrioritizerApp {
+impl PriogatorApp {
     pub fn new(ctx: &egui::Context, config: Config) -> Self {
         // Labels would otherwise take the mouse for text selection,
         // which gets in the way of dragging cards.
@@ -222,6 +299,7 @@ impl PrioritizerApp {
             last_backup: None,
             backups_dialog: None,
             about_open: false,
+            about_page: AboutPage::Main,
             settings_open: false,
             shortcuts_open: false,
             undo: Vec::new(),
@@ -554,7 +632,7 @@ impl PrioritizerApp {
         ui.horizontal(|ui| {
             let (logo, _) = ui.allocate_exact_size(egui::Vec2::splat(24.0), Sense::hover());
             paint_logo(ui.painter(), logo);
-            ui.label(RichText::new("Prioritizer").font(crate::fonts::bold(18.0)));
+            ui.label(RichText::new("Priogator").font(crate::fonts::bold(18.0)));
             ui.add_space(8.0);
             if ui
                 .button("+ New task")
@@ -683,7 +761,7 @@ impl PrioritizerApp {
             if ui.button("Keyboard shortcuts").clicked() {
                 self.shortcuts_open = true;
             }
-            if ui.button("About Prioritizer").clicked() {
+            if ui.button("About Priogator").clicked() {
                 self.about_open = true;
             }
         })
@@ -1875,8 +1953,8 @@ impl PrioritizerApp {
                 }
                 if ui.button("Restore from file…").clicked()
                     && let Some(path) = rfd::FileDialog::new()
-                        .set_title("Restore Prioritizer backup")
-                        .add_filter("Prioritizer data", &["json"])
+                        .set_title("Restore Priogator backup")
+                        .add_filter("Priogator data", &["json"])
                         .set_directory(self.backups.dir())
                         .pick_file()
                 {
@@ -2164,32 +2242,146 @@ impl PrioritizerApp {
         if !self.about_open {
             return;
         }
-        let modal = egui::Modal::new(egui::Id::unique("about")).show(ctx, |ui| {
-            ui.set_width(300.0);
-            ui.vertical_centered(|ui| {
+        let mut close = false;
+        let mut page = self.about_page;
+        let modal = egui::Modal::new(egui::Id::unique("about")).show(ctx, |ui| match page {
+            AboutPage::Main => {
+                ui.set_width(300.0);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(4.0);
+                    let (logo, _) = ui.allocate_exact_size(egui::Vec2::splat(64.0), Sense::hover());
+                    paint_logo(ui.painter(), logo);
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Priogator").font(crate::fonts::bold(24.0)));
+                    ui.label("Priority tracker");
+                    ui.label(
+                        RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
+                            .small()
+                            .weak(),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(
+                        "A to-do list for every area of your life, with easy re-prioritizing.",
+                    );
+                    ui.add_space(8.0);
+                    ui.label("Designed by Andreas Zoglauer");
+                    ui.label("Implemented by Claude");
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("Free software under the Apache License 2.0")
+                            .small()
+                            .weak(),
+                    );
+                    ui.horizontal(|ui| {
+                        // Center the two links.
+                        let width = 190.0;
+                        ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+                        if ui.link("License").clicked() {
+                            page = AboutPage::License;
+                        }
+                        ui.label(RichText::new("·").weak());
+                        if ui.link("Acknowledgements").clicked() {
+                            page = AboutPage::Acknowledgements;
+                        }
+                    });
+                    ui.add_space(8.0);
+                    close = ui.button("Close").clicked();
+                });
+            }
+            AboutPage::License => {
+                ui.set_width(560.0);
+                ui.heading("License");
                 ui.add_space(4.0);
-                let (logo, _) = ui.allocate_exact_size(egui::Vec2::splat(64.0), Sense::hover());
-                paint_logo(ui.painter(), logo);
+                ui.label(format!(
+                    "Priogator {}, copyright 2026 Andreas Zoglauer, is licensed under the \
+                     Apache License, Version 2.0:",
+                    env!("CARGO_PKG_VERSION")
+                ));
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(crate::licenses::OWN).monospace().small());
+                    });
+                about_footer(ui, &mut page, &mut close);
+            }
+            AboutPage::Acknowledgements => {
+                ui.set_width(560.0);
+                ui.heading("Acknowledgements");
                 ui.add_space(4.0);
-                ui.label(RichText::new("Prioritizer").font(crate::fonts::bold(24.0)));
-                ui.label(
-                    RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
-                        .small()
-                        .weak(),
-                );
-                ui.add_space(8.0);
-                ui.label("A to-do list for every area of your life, with easy re-prioritizing.");
-                ui.add_space(8.0);
-                ui.label("Designed by Andreas Zoglauer");
-                ui.label("Implemented by Claude");
-                ui.add_space(8.0);
-                ui.button("Close").clicked()
-            })
-            .inner
+                let licenses = crate::licenses::third_party();
+                egui::ScrollArea::vertical()
+                    .max_height(460.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.label(
+                            "Priogator stands on the shoulders of open-source software. \
+                             Thank you to everyone who wrote and shares it, especially:",
+                        );
+                        ui.add_space(6.0);
+                        egui::Grid::new("thanks")
+                            .num_columns(2)
+                            .spacing([16.0, 4.0])
+                            .show(ui, |ui| {
+                                for (project, people, url) in THANKS {
+                                    ui.hyperlink_to(project, url);
+                                    ui.label(people);
+                                    ui.end_row();
+                                }
+                            });
+                        ui.add_space(6.0);
+                        ui.label("…and the Rust project, which makes all of this possible.");
+                        ui.add_space(10.0);
+                        ui.label(format!(
+                            "Priogator includes {} open-source libraries. Their authors ask \
+                             that their licenses come with the app; here they are, each with \
+                             the libraries that use it.",
+                            crate::licenses::library_count(licenses)
+                        ));
+                        ui.add_space(6.0);
+                        for (name, texts) in crate::licenses::by_name(licenses) {
+                            let count: usize = texts.iter().map(|l| l.libraries.len()).sum();
+                            let title = format!(
+                                "{name} · {count} {}",
+                                if count == 1 { "library" } else { "libraries" }
+                            );
+                            egui::CollapsingHeader::new(title)
+                                .id_salt(name)
+                                .show(ui, |ui| {
+                                    for (i, license) in texts.iter().enumerate() {
+                                        if i > 0 {
+                                            ui.separator();
+                                        }
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 0.0;
+                                            ui.label(RichText::new("Used by ").weak());
+                                            for (j, lib) in license.libraries.iter().enumerate() {
+                                                if j > 0 {
+                                                    ui.label(", ");
+                                                }
+                                                let label = format!("{} {}", lib.name, lib.version);
+                                                if lib.repository.is_empty() {
+                                                    ui.label(label);
+                                                } else {
+                                                    ui.hyperlink_to(label, &lib.repository);
+                                                }
+                                            }
+                                        });
+                                        ui.add_space(4.0);
+                                        ui.label(RichText::new(&license.text).monospace().small());
+                                    }
+                                });
+                        }
+                    });
+                about_footer(ui, &mut page, &mut close);
+            }
         });
-        if modal.inner || modal.should_close() {
+        if close || (modal.should_close() && page == self.about_page) {
             self.about_open = false;
+            page = AboutPage::Main;
         }
+        self.about_page = page;
     }
 
     fn area_editor(&mut self, ctx: &egui::Context) {
@@ -2821,7 +3013,7 @@ fn deadline_label(ui: &mut egui::Ui, deadline: Date, today: Date) {
     .on_hover_text(deadline.strftime("%A, %B %-d, %Y").to_string());
 }
 
-impl eframe::App for PrioritizerApp {
+impl eframe::App for PriogatorApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.sync();
         // Areas opened outside their active hours fold again once the window
@@ -2831,6 +3023,10 @@ impl eframe::App for PrioritizerApp {
             self.unfolded.clear();
         }
         self.window_focused = focused;
+        #[cfg(target_os = "macos")]
+        if crate::macos_menu::take_request() {
+            self.about_open = true;
+        }
         // Which deadlines count as close; set before the undo snapshot below,
         // as this isn't a change of its own.
         self.board.today = today();
@@ -2910,10 +3106,7 @@ mod tests {
     }
 
     /// The real app in a 1280×800 test window.
-    fn harness(
-        config: Config,
-        theme: egui::Theme,
-    ) -> egui_kittest::Harness<'static, PrioritizerApp> {
+    fn harness(config: Config, theme: egui::Theme) -> egui_kittest::Harness<'static, PriogatorApp> {
         egui_kittest::Harness::builder()
             .with_size([1280.0, 800.0])
             .with_pixels_per_point(2.0)
@@ -2923,18 +3116,18 @@ mod tests {
                 cc.egui_ctx.add_font_provider(std::sync::Arc::new(
                     egui_system_font_provider::SystemFontProvider::new(),
                 ));
-                PrioritizerApp::new(&cc.egui_ctx, config)
+                PriogatorApp::new(&cc.egui_ctx, config)
             })
     }
 
-    fn click_at(harness: &mut egui_kittest::Harness<'_, PrioritizerApp>, pos: egui::Pos2) {
+    fn click_at(harness: &mut egui_kittest::Harness<'_, PriogatorApp>, pos: egui::Pos2) {
         harness.hover_at(pos);
         harness.drag_at(pos);
         harness.drop_at(pos);
         harness.run_steps(2);
     }
 
-    fn right_click_at(harness: &mut egui_kittest::Harness<'_, PrioritizerApp>, pos: egui::Pos2) {
+    fn right_click_at(harness: &mut egui_kittest::Harness<'_, PriogatorApp>, pos: egui::Pos2) {
         harness.hover_at(pos);
         for pressed in [true, false] {
             harness.event(egui::Event::PointerButton {
@@ -2949,7 +3142,7 @@ mod tests {
 
     /// Press at `from`, move to `to` in a few steps, release there.
     fn drag(
-        harness: &mut egui_kittest::Harness<'_, PrioritizerApp>,
+        harness: &mut egui_kittest::Harness<'_, PriogatorApp>,
         from: egui::Pos2,
         to: egui::Pos2,
     ) {
@@ -2976,7 +3169,7 @@ mod tests {
         let mut harness = harness(demo_config(dir.path()), egui::Theme::Light);
         harness.run_steps(2);
         let work = harness.state().board.areas_sorted()[0].meta.id;
-        let top = |h: &egui_kittest::Harness<'_, PrioritizerApp>| -> Vec<String> {
+        let top = |h: &egui_kittest::Harness<'_, PriogatorApp>| -> Vec<String> {
             h.state()
                 .board
                 .top_list(work)
@@ -3259,6 +3452,22 @@ mod tests {
                 harness.run_steps(4);
                 let image = harness.render().expect("render");
                 image.save(format!("{prefix}-about.png")).expect("save");
+                for (page, name) in [
+                    (AboutPage::License, "license"),
+                    (AboutPage::Acknowledgements, "thanks"),
+                ] {
+                    harness.state_mut().about_page = page;
+                    harness.run_steps(4);
+                    let image = harness.render().expect("render");
+                    image
+                        .save(format!("{prefix}-about-{name}.png"))
+                        .expect("save");
+                }
+                harness.get_by_label_contains("MIT License ·").click();
+                harness.run_steps(4);
+                let image = harness.render().expect("render");
+                image.save(format!("{prefix}-about-thanks-open.png")).expect("save");
+                harness.state_mut().about_page = AboutPage::Main;
 
                 // An area with more groups than fit on one line.
                 let app = harness.state_mut();

@@ -1,8 +1,8 @@
-Prioritizer
+Priogator
 
 Key design features
 
-Prioritizer is a special to-do list
+Priogator is a special to-do list
 It has a multi-column format for e.g. work, private-enterpices, house, family etc.
 
 Key differentiator is that tasks can easily re-priorized
@@ -17,11 +17,11 @@ On the left is a column with statistics and the option to create new tasks
 
 macOS:
 
-    scripts/bundle-macos.sh --install   # builds Prioritizer.app into ~/Applications
+    scripts/bundle-macos.sh --install   # builds Priogator.app into ~/Applications
 
 Linux (first install Rust and the system libraries listed below):
 
-    scripts/install-linux.sh            # ~/.local/bin/prioritizer + app-launcher entry
+    scripts/install-linux.sh            # ~/.local/bin/priogator + app-launcher entry
 
 Libraries egui needs on Linux (Ubuntu/Debian names):
 
@@ -82,6 +82,9 @@ Written in Rust with egui; runs on macOS and Linux.
     APP_PREVIEW=/tmp/app cargo test app_preview -- --ignored
                          # screenshots of the window with example data (light + dark)
     cargo build --release
+    scripts/licenses.sh  # after changing dependencies: update the list of
+                         # library licenses shown under About → Acknowledgements
+                         # (needs: cargo install --locked cargo-about --features cli)
 
 Code layout:
 
@@ -92,12 +95,14 @@ Code layout:
 - `src/fonts.rs`, `src/theme.rs` – system fonts and macOS text colours
 - `src/backup.rs`  – daily backups and which of them to keep
 - `src/demo.rs`    – example data
+- `src/licenses.rs` – the licenses shown in the About dialog
+- `src/macos_menu.rs` – makes the macOS menu's About open the app's own dialog
 - `scripts/`        – packaging, and `make_icon.py` which draws `assets/icon.png`
 
 ## Data and syncing between computers
 
-Settings live in `config.json` (macOS: `~/Library/Application Support/Prioritizer/`,
-Linux: `~/.config/prioritizer/`). It holds this computer's device name and the
+Settings live in `config.json` (macOS: `~/Library/Application Support/Priogator/`,
+Linux: `~/.config/priogator/`). It holds this computer's device name and the
 sync folder.
 
 The sync folder (default: `sync/` inside the data folder) holds one file per
@@ -111,8 +116,8 @@ other computer appear within a few seconds while the app is running.
 ### Backups
 
 Every day the app runs it saves a backup of everything to `backups/` in the
-data folder (macOS: `~/Library/Application Support/Prioritizer/backups`, Linux:
-`~/.local/share/prioritizer/backups`). These stay on each computer and are not
+data folder (macOS: `~/Library/Application Support/Priogator/backups`, Linux:
+`~/.local/share/priogator/backups`). These stay on each computer and are not
 synced. All backups of the last 7 days are kept, then one per week for 2
 months, one per month for 2 years, and one per year after that.
 
@@ -132,8 +137,8 @@ syncs to the other computer like any other change.
 3. On the Mac: *Add Remote Device* and enter the Linux laptop's device ID
    (*Actions → Show ID* there). Accept it on the Linux side.
 4. On the Mac: *Add Folder* with path
-   `~/Library/Application Support/Prioritizer/sync`, share it with the Linux
-   laptop. On Linux accept it with path `~/.local/share/prioritizer/sync`.
+   `~/Library/Application Support/Priogator/sync`, share it with the Linux
+   laptop. On Linux accept it with path `~/.local/share/priogator/sync`.
 
 Without a network, copy the `device-*.json` files both ways with a USB stick;
 because each computer only writes its own file, copying can't overwrite
