@@ -9,10 +9,10 @@ use uuid::Uuid;
 
 use crate::active::{ActiveHours, clock};
 use crate::backup::{BackupFile, Backups};
-use crate::board::{Board, TaskDetails};
+use crate::board::{Board, TASK_COLORS, TaskDetails};
 use crate::model::{Subtask, TaskItem};
 use crate::repeat::{Repeat, Unit, WEEKDAY_BUTTONS};
-use crate::storage::{Config, SyncFolder, read_board_file};
+use crate::storage::{ColorScheme, Config, SyncFolder, read_board_file};
 
 pub const DEFAULT_COLUMN_WIDTH: f32 = 280.0;
 const COLUMN_WIDTHS: std::ops::RangeInclusive<f32> = 200.0..=600.0;
@@ -29,7 +29,10 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const UNDO_LIMIT: usize = 100;
 
 const OVERDUE: Color32 = Color32::from_rgb(220, 70, 60);
-const DUE_SOON: Color32 = Color32::from_rgb(230, 160, 40);
+const DUE_SOON_RGB: [u8; 3] = [230, 160, 40];
+const DUE_SOON: Color32 = Color32::from_rgb(DUE_SOON_RGB[0], DUE_SOON_RGB[1], DUE_SOON_RGB[2]);
+/// The standard orange's heading on a light background, picked by eye.
+const DUE_SOON_HEADING_LIGHT: Color32 = Color32::from_rgb(170, 105, 0);
 /// Subtask progress bar.
 const PROGRESS: Color32 = Color32::from_rgb(52, 168, 83);
 
@@ -60,6 +63,8 @@ enum Action {
     Drop(Uuid, DropTarget),
     Pin(Uuid),
     Unpin(Uuid),
+    SetColor(Uuid, Option<[u8; 3]>),
+    SetAreaColor(Uuid, Option<[u8; 3]>),
     SetFilter(Uuid, Option<Uuid>),
     NewGroup(Uuid),
     EditGroup(Uuid),
@@ -129,6 +134,7 @@ struct AreaEditor {
     id: Option<Uuid>,
     name: String,
     active: Option<ActiveHours>,
+    color: Option<[u8; 3]>,
 }
 
 struct BackupsDialog {
@@ -260,6 +266,135 @@ const THANKS: [(&str, &str, &str); 10] = [
 
 fn today() -> Date {
     jiff::Zoned::now().date()
+}
+
+/// A card background in the colour's hue: soft enough that group names,
+/// dates and red "overdue" stay readable (saturation and brightness as they
+/// appear on screen). Used by the rainbow scheme and for the preset task
+/// colours.
+fn soft_tint(dark: bool, color: Color32) -> Color32 {
+    let mut hsva = egui::ecolor::HsvaGamma::from(color);
+    if dark {
+        hsva.s *= 0.5;
+        hsva.v = 0.3;
+    } else {
+        hsva.s *= 0.2;
+        hsva.v = 1.0;
+    }
+    hsva.into()
+}
+
+/// The preset task colours as stored and shown: soft versions of
+/// [`TASK_COLORS`], for a light or dark window.
+fn preset_colors(dark: bool) -> [[u8; 3]; 8] {
+    TASK_COLORS.map(|c| {
+        let soft = soft_tint(dark, rgb(c));
+        [soft.r(), soft.g(), soft.b()]
+    })
+}
+
+/// Text colour for a card whose own colour is too dark for a light window
+/// (or too light for a dark one); `None` when the usual text reads fine.
+fn contrast_text(dark: bool, fill: Color32) -> Option<Color32> {
+    let light_fill = egui::Rgba::from(fill).intensity() > 0.25;
+    match (dark, light_fill) {
+        (false, false) => Some(Color32::from_gray(245)),
+        (true, true) => Some(Color32::from_gray(25)),
+        _ => None,
+    }
+}
+
+/// Names of [`TASK_COLORS`], for tooltips and screen readers.
+const TASK_COLOR_NAMES: [&str; 8] = [
+    "Red", "Orange", "Yellow", "Green", "Teal", "Blue", "Purple", "Pink",
+];
+
+/// Pick a card colour: the preset dots, any colour (`other`), or none.
+/// The colour is stored and shown exactly as picked. Returns whether it
+/// changed.
+fn color_choice(ui: &mut egui::Ui, color: &mut Option<[u8; 3]>, other: bool) -> bool {
+    let mut changed = false;
+    let outline = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    let presets = preset_colors(ui.visuals().dark_mode);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (preset, name) in presets.into_iter().zip(TASK_COLOR_NAMES) {
+            let selected = *color == Some(preset);
+            let response = color_dot(ui, rgb(preset), outline, selected);
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(egui::Role::RadioButton, true, selected, name)
+            });
+            if response
+                .on_hover_text(name)
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                *color = Some(preset);
+                changed = true;
+            }
+        }
+        if other {
+            ui.add_space(6.0);
+            // A colour of your own: shown as a dot once chosen.
+            if let Some(own) = color.filter(|c| !presets.contains(c)) {
+                color_dot(ui, rgb(own), outline, true);
+            }
+            let button = ui.add(egui::Button::new("Other…").small());
+            egui::Popup::from_toggle_button_response(&button)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    let mut picked = rgb(color.unwrap_or(presets[5]));
+                    if egui::color_picker::color_picker_color32(
+                        ui,
+                        &mut picked,
+                        egui::color_picker::Alpha::Opaque,
+                    ) {
+                        *color = Some([picked.r(), picked.g(), picked.b()]);
+                        changed = true;
+                    }
+                });
+        }
+        ui.add_space(6.0);
+        if ui
+            .add_enabled(color.is_some(), egui::Button::new("None").small())
+            .on_hover_text("Use the color scheme")
+            .clicked()
+        {
+            *color = None;
+            changed = true;
+        }
+    });
+    changed
+}
+
+/// A round colour swatch with a thin outline (pale colours need it), and a
+/// ring when selected or hovered.
+fn color_dot(ui: &mut egui::Ui, fill: Color32, outline: Color32, selected: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), Sense::click());
+    let painter = ui.painter();
+    painter.circle(rect.center(), 7.5, fill, egui::Stroke::new(1.0, outline));
+    if selected {
+        painter.circle_stroke(
+            rect.center(),
+            9.5,
+            egui::Stroke::new(1.5, ui.visuals().strong_text_color()),
+        );
+    } else if response.hovered() {
+        painter.circle_stroke(
+            rect.center(),
+            9.5,
+            egui::Stroke::new(1.0, ui.visuals().weak_text_color()),
+        );
+    }
+    response
+}
+
+/// The colour darkened to about two thirds of its brightness, for text in
+/// that colour on a light background.
+fn darker(color: Color32) -> Color32 {
+    let mut hsva = egui::ecolor::HsvaGamma::from(color);
+    hsva.v *= 0.72;
+    hsva.into()
 }
 
 fn rgb(c: [u8; 3]) -> Color32 {
@@ -409,6 +544,7 @@ impl PriogatorApp {
                 subtasks: Vec::new(),
                 lead_days: None,
                 repeat: None,
+                color: None,
             },
             has_deadline: false,
             deadline: today(),
@@ -460,6 +596,10 @@ impl PriogatorApp {
                     let area = self.board.tasks[&id].area;
                     self.board.pin(id, area);
                 }
+                Action::SetAreaColor(id, color) => self.board.set_area_color(id, color),
+                Action::SetColor(id, color) => {
+                    self.board.update_task(id, |t| t.color = color);
+                }
                 Action::Unpin(id) => {
                     let mut details = TaskDetails::from(&self.board.tasks[&id]);
                     details.pinned = false;
@@ -501,6 +641,7 @@ impl PriogatorApp {
                         id: None,
                         name: String::new(),
                         active: None,
+                        color: None,
                     });
                     continue;
                 }
@@ -510,6 +651,7 @@ impl PriogatorApp {
                             id: Some(id),
                             name: a.name.clone(),
                             active: a.active.clone(),
+                            color: a.color,
                         });
                     }
                     continue;
@@ -794,7 +936,25 @@ impl PriogatorApp {
                                     .id_salt((area.meta.id, "column"))
                                     .sense(Sense::click()),
                                 |ui| {
-                                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                                    let mut frame = egui::Frame::group(ui.style());
+                                    if let Some(color) = area.color {
+                                        let fill = rgb(color);
+                                        // On a dark colour in a light window (or the
+                                        // reverse) the column takes the other look, so
+                                        // every text, button and card stays readable.
+                                        let dark = ui.visuals().dark_mode;
+                                        if contrast_text(dark, fill).is_some() {
+                                            let other = if dark {
+                                                egui::Theme::Light
+                                            } else {
+                                                egui::Theme::Dark
+                                            };
+                                            *ui.visuals_mut() =
+                                                ui.ctx().style_of(other).visuals.clone();
+                                        }
+                                        frame = egui::Frame::group(ui.style()).fill(fill);
+                                    }
+                                    frame.show(ui, |ui| {
                                         let width = self.config.column_width;
                                         ui.set_width(
                                             width.clamp(
@@ -836,11 +996,25 @@ impl PriogatorApp {
         let id = area.meta.id;
         let size = egui::vec2(STRIP_WIDTH, ui.available_height());
         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-        let visuals = ui.visuals();
-        let fill = if response.hovered() {
-            visuals.widgets.hovered.weak_bg_fill
-        } else {
-            visuals.faint_bg_color
+        // Text colours that read on the area's colour (see `column`).
+        let dark = ui.visuals().dark_mode;
+        let visuals = match area.color {
+            Some(color) if contrast_text(dark, rgb(color)).is_some() => {
+                let other = if dark {
+                    egui::Theme::Light
+                } else {
+                    egui::Theme::Dark
+                };
+                ui.ctx().style_of(other).visuals.clone()
+            }
+            _ => ui.visuals().clone(),
+        };
+        let visuals = &visuals;
+        let fill = match (area.color, response.hovered()) {
+            (Some(color), false) => rgb(color),
+            (Some(color), true) => rgb(color).gamma_multiply(0.85),
+            (None, true) => visuals.widgets.hovered.weak_bg_fill,
+            (None, false) => visuals.faint_bg_color,
         };
         let painter = ui.painter();
         painter.rect(
@@ -915,7 +1089,8 @@ impl PriogatorApp {
         if response.clicked() {
             pass.actions.push(Action::Unfold(id));
         }
-        response.context_menu(|ui| area_menu(ui, id, true, pass));
+        let color = area.color;
+        response.context_menu(|ui| area_menu(ui, id, color, true, pass));
 
         // Tasks dropped on the strip go to the bottom of the area's list.
         pass.zones.push(ColumnZone {
@@ -953,6 +1128,8 @@ impl PriogatorApp {
             .into_iter()
             .filter(shown)
             .collect();
+        // The rainbow colours run over the open tasks, top section first.
+        let open_count = deadlines.len() + priorities.len();
 
         // The header is the handle for dragging the column; it also takes
         // double-clicks (rename) and right-clicks (menu).
@@ -988,7 +1165,8 @@ impl PriogatorApp {
         if header.double_clicked() {
             pass.actions.push(Action::RenameArea(area));
         }
-        header.context_menu(|ui| area_menu(ui, area, false, pass));
+        let color = self.board.areas.get(&area).and_then(|a| a.color);
+        header.context_menu(|ui| area_menu(ui, area, color, false, pass));
         ui.separator();
 
         let mut zone = ColumnZone {
@@ -1009,7 +1187,8 @@ impl PriogatorApp {
                 // The top section on a warm tint, so it stands apart from the
                 // priority list below.
                 let dark = ui.visuals().dark_mode;
-                let tint = DUE_SOON.gamma_multiply(if dark { 0.14 } else { 0.10 });
+                let color = self.config.due_soon_color.map_or(DUE_SOON, rgb);
+                let tint = color.gamma_multiply(if dark { 0.14 } else { 0.10 });
                 egui::Frame::new()
                     .fill(tint)
                     .corner_radius(6.0)
@@ -1017,18 +1196,19 @@ impl PriogatorApp {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         // (How soon is per task, so the heading names no number of days.)
-                        let heading = if dark {
-                            DUE_SOON
-                        } else {
-                            Color32::from_rgb(170, 105, 0)
+                        let heading = match (dark, self.config.due_soon_color) {
+                            (true, _) => color,
+                            (false, None) => DUE_SOON_HEADING_LIGHT,
+                            (false, Some(_)) => darker(color),
                         };
                         ui.label(RichText::new("DUE SOON · PINNED").small().color(heading));
                         zone.top_start = ui.cursor().top();
                         if deadlines.is_empty() {
                             ui.label(RichText::new("None").small().weak().italics());
                         }
-                        for task in &deadlines {
-                            let rect = self.task_card(ui, task, None, today, pass);
+                        for (i, task) in deadlines.iter().enumerate() {
+                            let tint = self.card_fill(ui, task, i, open_count);
+                            let rect = self.task_card(ui, task, None, tint, today, pass);
                             zone.top_cards.push((task.meta.id, rect));
                         }
                     });
@@ -1039,7 +1219,8 @@ impl PriogatorApp {
                     ui.label(RichText::new("Drop tasks here").small().weak().italics());
                 }
                 for (i, task) in priorities.iter().enumerate() {
-                    let rect = self.task_card(ui, task, Some(i + 1), today, pass);
+                    let tint = self.card_fill(ui, task, deadlines.len() + i, open_count);
+                    let rect = self.task_card(ui, task, Some(i + 1), tint, today, pass);
                     zone.cards.push((task.meta.id, rect));
                 }
                 if !done.is_empty() {
@@ -1052,7 +1233,7 @@ impl PriogatorApp {
                     .id_salt((area, "done"))
                     .show(ui, |ui| {
                         for task in &done {
-                            self.task_card(ui, task, None, today, pass);
+                            self.task_card(ui, task, None, None, today, pass);
                         }
                     });
                 }
@@ -1118,11 +1299,52 @@ impl PriogatorApp {
 
     /// Draw one task. `position` is its place in the priority list (1 = top),
     /// `None` elsewhere. Returns the card's rectangle.
+    /// The card colour for the open task at `index` (of `count`) in an area
+    /// with the rainbow colours: red for the most important, through orange,
+    /// yellow and green, to blue. `None` with the standard colours.
+    fn rainbow(&self, ui: &egui::Ui, index: usize, count: usize) -> Option<Color32> {
+        if self.config.color_scheme != ColorScheme::Rainbow {
+            return None;
+        }
+        let t = if count > 1 {
+            index as f32 / (count - 1) as f32
+        } else {
+            0.0
+        };
+        // Hue 0 is red, 0.62 blue.
+        let hue = t * 0.62;
+        Some(soft_tint(
+            ui.visuals().dark_mode,
+            egui::ecolor::HsvaGamma {
+                h: hue,
+                s: 1.0,
+                v: 1.0,
+                a: 1.0,
+            }
+            .into(),
+        ))
+    }
+
+    /// A card's background: the task's own colour, else the colour scheme's.
+    fn card_fill(
+        &self,
+        ui: &egui::Ui,
+        task: &TaskItem,
+        index: usize,
+        count: usize,
+    ) -> Option<Color32> {
+        match task.color {
+            Some(color) => Some(rgb(color)),
+            None => self.rainbow(ui, index, count),
+        }
+    }
+
     fn task_card(
         &self,
         ui: &mut egui::Ui,
         task: &TaskItem,
         position: Option<usize>,
+        tint: Option<Color32>,
         today: Date,
         pass: &mut Pass,
     ) -> Rect {
@@ -1147,7 +1369,9 @@ impl PriogatorApp {
             .scope_builder(UiBuilder::new().id_salt(("task", id)).sense(sense), |ui| {
                 egui::Frame::new()
                     // Solid, so cards look the same on the top section's tint.
-                    .fill(ui.visuals().panel_fill.blend(ui.visuals().faint_bg_color))
+                    .fill(tint.unwrap_or_else(|| {
+                        ui.visuals().panel_fill.blend(ui.visuals().faint_bg_color)
+                    }))
                     .stroke(stroke)
                     .corner_radius(4.0)
                     .inner_margin(egui::Margin {
@@ -1163,6 +1387,10 @@ impl PriogatorApp {
                     })
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
+                        // Readable text on a task's own dark (or light) colour.
+                        // (Also undoes the area's text colour: cards have their own.)
+                        ui.visuals_mut().override_text_color =
+                            tint.and_then(|fill| contrast_text(ui.visuals().dark_mode, fill));
                         // A line for the group's name in small letters above the
                         // title; the name is drawn once the title's position is known.
                         let group_line = group.map(|_| {
@@ -1397,6 +1625,13 @@ impl PriogatorApp {
                     pass.actions.push(Action::Pin(id));
                 }
             }
+            ui.menu_button("Color", |ui| {
+                let mut color = task.color;
+                if color_choice(ui, &mut color, false) {
+                    pass.actions.push(Action::SetColor(id, color));
+                    ui.close();
+                }
+            });
             if task.done {
                 if ui.button("Reopen").clicked() {
                     pass.actions.push(Action::SetDone(id, false));
@@ -1658,6 +1893,10 @@ impl PriogatorApp {
                         &mut editor.details.pinned,
                         "Keep on top, whatever the deadline",
                     );
+                    ui.end_row();
+
+                    label(ui, "Color");
+                    color_choice(ui, &mut editor.details.color, true);
                     ui.end_row();
                 });
 
@@ -2161,6 +2400,50 @@ impl PriogatorApp {
                         }
                     });
                     ui.end_row();
+                    ui.label("Colors");
+                    egui::ComboBox::from_id_salt("color_scheme")
+                        .selected_text(config.color_scheme.name())
+                        .show_ui(ui, |ui| {
+                            for scheme in ColorScheme::ALL {
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut config.color_scheme,
+                                        scheme,
+                                        scheme.name(),
+                                    )
+                                    .changed();
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "Rainbow: each area's tasks from red (most important) to blue",
+                        );
+                    ui.end_row();
+                    ui.label("Due soon color");
+                    ui.horizontal(|ui| {
+                        let mut color = config.due_soon_color.unwrap_or(DUE_SOON_RGB);
+                        if ui
+                            .color_edit_button_srgb(&mut color)
+                            .on_hover_text(
+                                "Background and heading of the Due soon · pinned section",
+                            )
+                            .changed()
+                        {
+                            config.due_soon_color = Some(color);
+                            changed = true;
+                        }
+                        if ui
+                            .add_enabled(
+                                config.due_soon_color.is_some(),
+                                egui::Button::new("Default").small(),
+                            )
+                            .clicked()
+                        {
+                            config.due_soon_color = None;
+                            changed = true;
+                        }
+                    });
+                    ui.end_row();
                 });
             ui.label(
                 RichText::new(
@@ -2460,6 +2743,11 @@ impl PriogatorApp {
             ui.add_space(8.0);
             active_hours_editor(ui, &mut editor.active);
             ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label("Color");
+                color_choice(ui, &mut editor.color, true);
+            });
+            ui.add_space(8.0);
             let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
             ui.allocate_ui_with_layout(
                 row,
@@ -2486,6 +2774,7 @@ impl PriogatorApp {
                 None => self.board.add_area(&editor.name),
             };
             self.board.set_active_hours(id, editor.active.clone());
+            self.board.set_area_color(id, editor.color);
             self.dirty = true;
             close = true;
         }
@@ -2611,7 +2900,7 @@ fn fold_button(ui: &mut egui::Ui) -> egui::Response {
 }
 
 /// The right-click menu of an area (its title or its folded strip).
-fn area_menu(ui: &mut egui::Ui, area: Uuid, folded: bool, pass: &mut Pass) {
+fn area_menu(ui: &mut egui::Ui, area: Uuid, color: Option<[u8; 3]>, folded: bool, pass: &mut Pass) {
     if ui.button("New task…").clicked() {
         pass.actions.push(Action::NewTask(area));
     }
@@ -2626,6 +2915,13 @@ fn area_menu(ui: &mut egui::Ui, area: Uuid, folded: bool, pass: &mut Pass) {
     if ui.button("Edit area…").clicked() {
         pass.actions.push(Action::RenameArea(area));
     }
+    ui.menu_button("Color", |ui| {
+        let mut color = color;
+        if color_choice(ui, &mut color, false) {
+            pass.actions.push(Action::SetAreaColor(area, color));
+            ui.close();
+        }
+    });
     if ui.button("Move left").clicked() {
         pass.actions.push(Action::ShiftArea(area, -1));
     }
@@ -2958,12 +3254,31 @@ fn short_path(path: &std::path::Path) -> String {
 /// Open a folder in Finder / the Linux file manager.
 fn show_folder(dir: &std::path::Path) {
     let _ = std::fs::create_dir_all(dir);
+    open_with_system(dir.as_os_str());
+}
+
+/// Open a folder or web address with the system's default app.
+fn open_with_system(target: &std::ffi::OsStr) {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else {
         "xdg-open"
     };
-    let _ = std::process::Command::new(opener).arg(dir).spawn();
+    let _ = std::process::Command::new(opener).arg(target).spawn();
+}
+
+/// Open the web links clicked this frame in the browser. (eframe could do
+/// this itself, but its "links" feature brings ~30 libraries along.)
+fn open_links(ctx: &egui::Context) {
+    ctx.output_mut(|output| {
+        output.commands.retain(|command| match command {
+            egui::OutputCommand::OpenUrl(open) if open.url.starts_with("https://") => {
+                open_with_system(open.url.as_ref());
+                false
+            }
+            _ => true,
+        });
+    });
 }
 
 /// The app icon (see `scripts/make_icon.py`), drawn as shapes so it's sharp
@@ -3111,6 +3426,7 @@ impl eframe::App for PriogatorApp {
         self.backups_dialog(&ctx);
         self.about_dialog(&ctx);
         self.shortcuts_dialog(&ctx);
+        open_links(&ctx);
 
         if self.board != before {
             self.undo.push(before);
@@ -3121,7 +3437,21 @@ impl eframe::App for PriogatorApp {
         }
     }
 
+    // eframe passes the OpenGL context along when it draws with OpenGL, which
+    // it does everywhere but on macOS (see Cargo.toml).
+    #[cfg(target_os = "macos")]
     fn on_exit(&mut self) {
+        self.save_on_exit();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_on_exit();
+    }
+}
+
+impl PriogatorApp {
+    fn save_on_exit(&mut self) {
         if self.dirty {
             let _ = self.folder.save(&self.board);
         }
@@ -3143,6 +3473,8 @@ mod tests {
             done_days: crate::board::DEFAULT_DONE_DAYS,
             column_width: DEFAULT_COLUMN_WIDTH,
             folded_areas: Vec::new(),
+            color_scheme: ColorScheme::Standard,
+            due_soon_color: None,
             // Not saved anywhere: tests must never touch the real settings.
             file: None,
         };
@@ -3159,13 +3491,8 @@ mod tests {
             .with_size([1280.0, 800.0])
             .with_pixels_per_point(2.0)
             .with_theme(theme)
-            .build_eframe(|cc| {
-                // As eframe does when running for real: symbols like ⌘ come from system fonts.
-                cc.egui_ctx.add_font_provider(std::sync::Arc::new(
-                    egui_system_font_provider::SystemFontProvider::new(),
-                ));
-                PriogatorApp::new(&cc.egui_ctx, config)
-            })
+            // Same setup as the real app, fonts included (see fonts::install).
+            .build_eframe(|cc| PriogatorApp::new(&cc.egui_ctx, config))
     }
 
     fn click_at(harness: &mut egui_kittest::Harness<'_, PriogatorApp>, pos: egui::Pos2) {
@@ -3448,6 +3775,115 @@ mod tests {
             let image = harness.render().expect("render");
             image.save(format!("{prefix}-{name}.png")).expect("save");
 
+            harness.state_mut().config.color_scheme = ColorScheme::Rainbow;
+            harness.run_steps(4);
+            let image = harness.render().expect("render");
+            image
+                .save(format!("{prefix}-{name}-rainbow.png"))
+                .expect("save");
+            harness.state_mut().config.color_scheme = ColorScheme::Standard;
+            harness.state_mut().config.due_soon_color = Some([70, 130, 230]);
+            harness.run_steps(4);
+            let image = harness.render().expect("render");
+            image
+                .save(format!("{prefix}-{name}-due-color.png"))
+                .expect("save");
+            harness.state_mut().config.due_soon_color = None;
+            harness.run_steps(4);
+
+            // A few tasks with their own colour, over the rainbow.
+            let app = harness.state_mut();
+            app.config.color_scheme = ColorScheme::Rainbow;
+            let colored: Vec<(Uuid, [u8; 3])> = [
+                (
+                    "Sketch landing page",
+                    preset_colors(theme == egui::Theme::Dark)[6],
+                ),
+                (
+                    "Fix dripping tap",
+                    preset_colors(theme == egui::Theme::Dark)[5],
+                ),
+                // A strong colour of one's own, with light text on it.
+                ("Call back the bank", [30, 70, 160]),
+            ]
+            .iter()
+            .map(|(title, color)| {
+                let id = app
+                    .board
+                    .tasks
+                    .values()
+                    .find(|t| t.title == *title)
+                    .unwrap()
+                    .meta
+                    .id;
+                (id, *color)
+            })
+            .collect();
+            for (id, color) in &colored {
+                app.board.update_task(*id, |t| t.color = Some(*color));
+            }
+            harness.run_steps(4);
+            let image = harness.render().expect("render");
+            image
+                .save(format!("{prefix}-{name}-task-colors.png"))
+                .expect("save");
+            if theme == egui::Theme::Light {
+                let card = harness.get_by_label("Sketch landing page").rect().center();
+                right_click_at(&mut harness, card);
+                harness.get_by_label("Color").hover();
+                harness.run_steps(4);
+                let image = harness.render().expect("render");
+                image
+                    .save(format!("{prefix}-color-menu.png"))
+                    .expect("save");
+                harness.key_press(egui::Key::Escape);
+                harness.run_steps(2);
+                let (id, _) = colored[0];
+                harness.state_mut().open_task_editor(id);
+                harness.run_steps(4);
+                let image = harness.render().expect("render");
+                image
+                    .save(format!("{prefix}-color-dialog.png"))
+                    .expect("save");
+                harness.get_by_label("Other…").click();
+                harness.run_steps(4);
+                let image = harness.render().expect("render");
+                image
+                    .save(format!("{prefix}-color-other.png"))
+                    .expect("save");
+                harness.key_press(egui::Key::Escape);
+                harness.run_steps(2);
+                harness.state_mut().task_editor = None;
+            }
+            // Areas with their own colour: a soft one, and a dark one with
+            // light text (cards keep theirs).
+            let app = harness.state_mut();
+            let areas: Vec<Uuid> = app.board.areas_sorted().iter().map(|a| a.meta.id).collect();
+            app.board
+                .set_area_color(areas[1], Some(preset_colors(theme == egui::Theme::Dark)[3]));
+            app.board.set_area_color(areas[3], Some([40, 50, 90]));
+            harness.run_steps(4);
+            let image = harness.render().expect("render");
+            image
+                .save(format!("{prefix}-{name}-area-colors.png"))
+                .expect("save");
+            harness.state_mut().config.folded_areas.push(areas[3]);
+            harness.run_steps(4);
+            let image = harness.render().expect("render");
+            image
+                .save(format!("{prefix}-{name}-area-folded.png"))
+                .expect("save");
+            harness.state_mut().config.folded_areas.clear();
+            let app = harness.state_mut();
+            app.board.set_area_color(areas[1], None);
+            app.board.set_area_color(areas[3], None);
+            let app = harness.state_mut();
+            for (id, _) in &colored {
+                app.board.update_task(*id, |t| t.color = None);
+            }
+            app.config.color_scheme = ColorScheme::Standard;
+            harness.run_steps(4);
+
             if theme == egui::Theme::Light {
                 let due = harness.get_by_label_contains("due within").rect().center();
                 harness.hover_at(due);
@@ -3598,6 +4034,7 @@ mod tests {
                     id: Some(areas[0]),
                     name: "Work".into(),
                     active: Some(ActiveHours::default()),
+                    color: None,
                 });
                 harness.run_steps(4);
                 let image = harness.render().expect("render");
@@ -3648,5 +4085,64 @@ mod tests {
                     .expect("save");
             }
         }
+    }
+
+    #[test]
+    fn a_task_gets_its_colour_from_the_context_menu() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut harness = harness(demo_config(dir.path()), egui::Theme::Light);
+        harness.run_steps(4);
+        let find = |h: &egui_kittest::Harness<'_, PriogatorApp>| {
+            h.state()
+                .board
+                .tasks
+                .values()
+                .find(|t| t.title == "Sketch landing page")
+                .map(|t| (t.meta.id, t.color))
+                .unwrap()
+        };
+        let card = harness.get_by_label("Sketch landing page").rect().center();
+        right_click_at(&mut harness, card);
+        harness.get_by_label("Color").hover();
+        harness.run_steps(4);
+        harness.get_by_label("Purple").click();
+        harness.run_steps(4);
+        assert_eq!(find(&harness).1, Some(preset_colors(false)[6]));
+        assert!(harness.query_by_label("Purple").is_none(), "menu closed");
+
+        // And back to none in the task dialog.
+        let (id, _) = find(&harness);
+        harness.state_mut().open_task_editor(id);
+        harness.run_steps(4);
+        harness
+            .get_by_role_and_label(egui::Role::Button, "None")
+            .click();
+        harness.run_steps(2);
+        harness.get_by_label("Save").click();
+        harness.run_steps(4);
+        assert_eq!(find(&harness).1, None);
+    }
+
+    #[test]
+    fn an_area_gets_its_colour_from_its_menu() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut harness = harness(demo_config(dir.path()), egui::Theme::Light);
+        harness.run_steps(4);
+        let work = harness.state().board.areas_sorted()[0].meta.id;
+        // Right-click the area's header, next to its name.
+        let name = harness.get_all_by_label("Work").next().unwrap().rect();
+        right_click_at(
+            &mut harness,
+            egui::pos2(name.right() + 60.0, name.center().y),
+        );
+        harness.get_by_label("Color").hover();
+        harness.run_steps(4);
+        harness.get_by_label("Green").click();
+        harness.run_steps(4);
+        assert_eq!(
+            harness.state().board.areas[&work].color,
+            Some(preset_colors(false)[3])
+        );
+        assert!(harness.query_by_label("Green").is_none(), "menu closed");
     }
 }

@@ -39,10 +39,37 @@ pub struct Config {
     /// Areas folded by hand on this computer (they stay folded until opened).
     #[serde(default)]
     pub folded_areas: Vec<uuid::Uuid>,
+    #[serde(default)]
+    pub color_scheme: ColorScheme,
+    /// Colour of the "Due soon · pinned" section; `None`: the standard orange.
+    #[serde(default)]
+    pub due_soon_color: Option<[u8; 3]>,
     /// The file it was loaded from and is saved to. `None` (e.g. in tests):
     /// never saved, so nothing can overwrite the real settings.
     #[serde(skip)]
     pub file: Option<PathBuf>,
+}
+
+/// How task cards are coloured.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorScheme {
+    /// Plain cards; only the group colours.
+    #[default]
+    Standard,
+    /// Each area's open tasks from red (most important) to blue.
+    Rainbow,
+}
+
+impl ColorScheme {
+    pub const ALL: [ColorScheme; 2] = [ColorScheme::Standard, ColorScheme::Rainbow];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ColorScheme::Standard => "Standard",
+            ColorScheme::Rainbow => "Rainbow",
+        }
+    }
 }
 
 fn default_done_days() -> i64 {
@@ -135,6 +162,8 @@ impl Config {
             done_days: default_done_days(),
             column_width: default_column_width(),
             folded_areas: Vec::new(),
+            color_scheme: ColorScheme::default(),
+            due_soon_color: None,
             file: Some(file),
         };
         config.save()?;
@@ -320,6 +349,8 @@ mod tests {
             done_days: 7,
             column_width: 280.0,
             folded_areas: Vec::new(),
+            color_scheme: ColorScheme::default(),
+            due_soon_color: None,
             file: None,
         };
         config.save().unwrap();

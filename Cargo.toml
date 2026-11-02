@@ -9,8 +9,10 @@ repository = "https://github.com/zoglauer/priogator"
 
 [dependencies]
 directories = "6.0.0"
-eframe = "0.37.0"
-egui_extras = { version = "0.37.0", features = ["datepicker"] }
+# Only the parts we use; the renderer is chosen per platform below.
+eframe = { version = "0.37.0", default-features = false, features = ["clipboard", "default_fonts", "wayland", "x11"] }
+egui_extras = { version = "0.37.0", default-features = false, features = ["datepicker"] }
+egui_system_font_provider = "0.37.0"
 fontique = { version = "0.11.1", default-features = false, features = ["system", "fontconfig-dlopen"] }
 hostname = "0.4.2"
 jiff = { version = "0.2.38", features = ["serde"] }
@@ -21,10 +23,15 @@ uuid = { version = "1.29.0", features = ["v4", "serde", "v5"] }
 
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["wgpu", "snapshot", "eframe"] }
-egui_system_font_provider = "0.37.0"
 tempfile = "3.27.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Draws with Metal.
+eframe = { version = "0.37.0", default-features = false, features = ["wgpu"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSMenu", "NSMenuItem", "NSResponder"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# Draws with OpenGL; much smaller than wgpu on Linux.
+eframe = { version = "0.37.0", default-features = false, features = ["glow"] }

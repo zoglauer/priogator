@@ -64,6 +64,9 @@ pub struct Area {
     /// `None`: always active.
     #[serde(default)]
     pub active: Option<crate::active::ActiveHours>,
+    /// Background colour of the area's column; `None`: the standard one.
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
 }
 
 /// A colour-coded sub-group within an area.
@@ -105,6 +108,9 @@ pub struct TaskItem {
     /// Recurring task: when the next occurrence is due.
     #[serde(default)]
     pub repeat: Option<crate::repeat::Repeat>,
+    /// Card colour chosen for this task; overrides the colour scheme.
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
     pub done: bool,
     pub created_at: Timestamp,
     pub completed_at: Option<Timestamp>,

@@ -271,6 +271,13 @@ which group is visible (**All ▾**, or e.g. **● Clients ▾**), and **+ New**
   it will go. Or right-click the title → **Move left** / **Move right**.
 - **Rename, active hours:** double-click the title, or right-click →
   **Edit area…**.
+- **Color:** right-click the title → **Color**, or in **Edit area…**. The
+  area's whole column (and its folded strip) gets the color, exactly as
+  picked: one of the soft dots, any color with **Other…**, or **None** for
+  the standard look. On a dark color in light mode (or a light one in dark
+  mode) the column switches to the other look, so everything stays
+  readable. Task cards keep their own colors. Synced to your other
+  computers.
 - **Delete:** right-click the title → **Delete area…**. The dialog says how
   many tasks and groups go with it; those are deleted too. ⌘Z brings
   everything back.
@@ -382,6 +389,23 @@ The sync folder is:
 - **Deadlines move to the top:** the deadline window, 10 days by default.
 - **Done tasks stay visible for:** 7 days by default.
 - **Area width:** 280 pixels by default, anywhere from 200 to 600.
+- **Colors:** *Standard* keeps the cards plain. *Rainbow* colours each
+  area's open tasks by priority: the first one (at the top of Due soon ·
+  pinned) red, then orange, yellow, green, down to blue for the last one in
+  the priority list. Reorder a task and its colour follows. Group colours
+  stay on the left edge; done tasks stay plain.
+- A single task can have its **own color**, which overrides Standard and
+  Rainbow for that card: in the task dialog (**Color** row) or by
+  right-clicking the card → **Color**. The dots are soft colors that keep
+  text easy to read. **Other…** (in the dialog) opens a color picker for
+  any color, strong ones included; the card shows exactly the color you
+  pick, and its text turns white on dark colors. **None** goes
+  back to the color scheme. The color syncs
+  with the task and carries over to the next occurrence of a recurring task.
+- **Due soon color:** the colour of the *Due soon · pinned* section
+  (its background and heading). Click the swatch to pick one; **Default**
+  goes back to orange. The orange "today" / "in 3 d" dates keep their
+  colour.
   **Default** resets it.
 - **Backups:** how many there are, and **Manage backups…**.
 - **This computer:** its device name and sync folder. Click the folder to
@@ -400,6 +424,8 @@ All settings are stored in `config.json`:
 | `deadline_horizon_days` | the deadline window (also in Settings) |
 | `done_days` | how long done tasks stay visible (also in Settings) |
 | `column_width` | width of each area in pixels (also in Settings) |
+| `color_scheme` | `standard` or `rainbow` (also in Settings) |
+| `due_soon_color` | colour of the Due soon section as `[r, g, b]`, or `null` for the default (also in Settings) |
 
 Quit Priogator before editing the file by hand, and start it again
 afterwards. Give each computer its own `device` name.

@@ -18,7 +18,8 @@ pub fn bold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(BOLD.into()))
 }
 
-/// Install the system fonts and macOS-like text sizes. If a font can't be
+/// Install the system fonts, the fallback for missing characters, and
+/// macOS-like text sizes. If a font can't be
 /// found, egui's built-in one stays in place for that family.
 pub fn install(ctx: &egui::Context) {
     let mut collection = Collection::new(CollectionOptions {
@@ -81,6 +82,12 @@ pub fn install(ctx: &egui::Context) {
         .families
         .insert(FontFamily::Name(BOLD.into()), bold_family);
     ctx.set_fonts(fonts);
+    // Characters the UI font lacks (☰, emoji, CJK, …) come from whichever
+    // system font has them. Done here rather than by eframe, so the tests
+    // run exactly this too.
+    ctx.add_font_provider(std::sync::Arc::new(
+        egui_system_font_provider::SystemFontProvider::new(),
+    ));
 
     ctx.all_styles_mut(|style| {
         style.text_styles = [

@@ -116,6 +116,22 @@ After a change the owner will look at, rebuild and reinstall the app:
 - Areas fold to a narrow strip with the name rotated (reads bottom to top),
   bold like the headers. Folding: ‹ button, or automatically outside active
   hours once the window loses focus.
+- Colors setting (`ColorScheme` in `storage.rs`): Standard, or Rainbow,
+  which tints each area's open cards red → blue by position (top section
+  first). Tints are set in on-screen values (`HsvaGamma`), soft enough that
+  group names, dates and red "overdue" stay readable in light and dark.
+- Per-task colour (`TaskItem.color`, synced): overrides the scheme and is
+  shown **exactly as stored** — what the picker shows is what the card
+  shows (the owner insisted). Preset dots are soft tints of `TASK_COLORS`
+  for the current light/dark mode (`preset_colors`, same tint as Rainbow,
+  stored as such); "Other…" is egui's full picker. On a colour too dark
+  for a light window (or too light for a dark one) the card's text flips
+  (`contrast_text`). Keep the tints soft; the owner preferred them.
+- Area colour (`Area.color`, synced): the column's background (and folded
+  strip), exactly as stored, chosen with the same `color_choice`. If it
+  contrasts with the window's mode (`contrast_text`), the column uses the
+  other theme's visuals (`ctx.style_of(other)`), so labels, buttons and
+  cards stay readable.
 - macOS look: system fonts, macOS label colours, dark mode follows the system.
 - The owner refines visuals a lot. When they describe a layout, implement
   exactly that rather than an alternative of your own; render previews and
@@ -132,6 +148,34 @@ After a change the owner will look at, rebuild and reinstall the app:
 - kittest: import `Queryable`; labels must be unique for `get_by_label`,
   otherwise use `get_all_by_label(..).next()` or role filters. Clicking a
   widget that is scrolled out of view clicks outside the modal and closes it.
+
+## Dependencies: ship only what's needed
+
+The owner wants as few libraries in the app as possible. Count them with
+`cargo tree -e normal --target aarch64-apple-darwin --prefix none --format '{p}' | sort -u | wc -l`
+(and `--target x86_64-unknown-linux-gnu`); at 1.0 it was 164 / 168.
+
+- eframe has `default-features = false`, with only `clipboard`,
+  `default_fonts`, `system_fonts`, `wayland`, `x11`. Renderer per platform: `wgpu` (Metal)
+  on macOS, `glow` (OpenGL) elsewhere, set in the target sections of
+  `Cargo.toml`. Because of that, `App::on_exit` has two cfg'd signatures.
+- Not included on purpose: `accesskit` (screen readers; ~60 libraries on
+  Linux), `links` (we open URLs ourselves in `open_links`, like folders
+  via `open` / `xdg-open`), `web_screen_reader`, egui_extras' default
+  file loaders.
+- Fallback fonts for characters the UI font lacks (☰, emoji, CJK…) come
+  from `egui_system_font_provider`, added in `fonts::install` (eframe's own
+  `system_fonts` feature and `system_font_fallback` are off). Without it
+  those characters render wrong.
+- **Tests and previews must use the same libraries and features as the
+  app**, or they show something the app doesn't. `scripts/check-test-parity.sh`
+  compares the two builds (macOS; only accesskit may differ, kittest needs
+  it to find widgets). Run it after changing dependencies or features;
+  `release.sh` runs it too. Set things up in shared code (as
+  `fonts::install`), not in the test harness.
+- Before adding a dependency or feature, check what it pulls in, and say
+  so. Check that Linux still compiles:
+  `cargo check --target x86_64-unknown-linux-gnu`.
 
 ## Licenses (keep up to date)
 

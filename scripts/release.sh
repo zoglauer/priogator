@@ -45,6 +45,7 @@ fi
 echo "== Testing"
 cargo test --quiet
 cargo clippy --quiet --all-targets -- -D warnings
+scripts/check-test-parity.sh
 
 echo "== $current → $next"
 # Only the package's own version starts a line; dependencies use inline tables.

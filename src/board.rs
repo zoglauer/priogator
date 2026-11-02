@@ -69,6 +69,7 @@ pub struct TaskDetails {
     pub subtasks: Vec<Subtask>,
     pub lead_days: Option<i64>,
     pub repeat: Option<Repeat>,
+    pub color: Option<[u8; 3]>,
 }
 
 impl From<&TaskItem> for TaskDetails {
@@ -83,9 +84,22 @@ impl From<&TaskItem> for TaskDetails {
             subtasks: t.subtasks.clone(),
             lead_days: t.lead_days,
             repeat: t.repeat.clone(),
+            color: t.color,
         }
     }
 }
+
+/// Colours offered for a single task's card, red to pink.
+pub const TASK_COLORS: [[u8; 3]; 8] = [
+    [229, 57, 53],
+    [251, 140, 0],
+    [253, 216, 53],
+    [67, 160, 71],
+    [0, 172, 193],
+    [30, 136, 229],
+    [142, 36, 170],
+    [216, 27, 96],
+];
 
 /// Colours offered for new groups, in order.
 pub const GROUP_COLORS: [[u8; 3]; 8] = [
@@ -122,6 +136,7 @@ impl Board {
                 name: (*name).to_owned(),
                 order: i as f64,
                 active: None,
+                color: None,
             });
         }
     }
@@ -309,6 +324,7 @@ impl Board {
                 top_rank: None,
                 lead_days: None,
                 repeat: None,
+                color: None,
                 done: false,
                 created_at: Timestamp::now(),
                 completed_at: None,
@@ -526,6 +542,7 @@ impl Board {
             t.pinned = details.pinned;
             t.lead_days = details.lead_days;
             t.repeat = details.repeat;
+            t.color = details.color;
             t.subtasks = details
                 .subtasks
                 .into_iter()
@@ -556,6 +573,7 @@ impl Board {
                 name: name.trim().to_owned(),
                 order,
                 active: None,
+                color: None,
             },
         );
         id
@@ -575,6 +593,12 @@ impl Board {
     pub fn set_active_hours(&mut self, id: Uuid, active: Option<crate::active::ActiveHours>) {
         if self.areas.get(&id).is_some_and(|a| a.active != active) {
             self.update_area(id, |a| a.active = active);
+        }
+    }
+
+    pub fn set_area_color(&mut self, id: Uuid, color: Option<[u8; 3]>) {
+        if self.areas.get(&id).is_some_and(|a| a.color != color) {
+            self.update_area(id, |a| a.color = color);
         }
     }
 
@@ -1391,5 +1415,26 @@ mod tests {
         assert_eq!(b.tasks[&due].group, Some(clients), "tasks keep their group");
         assert_eq!(b.tasks[&done].area, house, "done tasks move along");
         assert!(b.groups_of(work).is_empty());
+    }
+
+    #[test]
+    fn a_task_keeps_its_colour() {
+        let mut b = Board::new("mac");
+        b.today = TODAY;
+        b.add_default_areas();
+        let area = b.areas_sorted()[0].meta.id;
+        let id = b.add_task(area, "trash", None, Some(TODAY));
+        let mut details = TaskDetails::from(&b.tasks[&id]);
+        details.color = Some(TASK_COLORS[3]);
+        details.repeat = Some(Repeat::Schedule {
+            every: 1,
+            unit: crate::repeat::Unit::Weeks,
+            weekdays: vec![],
+        });
+        b.update_details(id, details);
+        assert_eq!(b.tasks[&id].color, Some(TASK_COLORS[3]));
+        // The next occurrence of a recurring task has it too.
+        b.set_done(id, true);
+        assert_eq!(b.tasks[&successor_id(id)].color, Some(TASK_COLORS[3]));
     }
 }

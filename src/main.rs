@@ -42,6 +42,8 @@ fn main() -> eframe::Result {
             )
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([700.0, 400.0]),
+        // fonts::install sets up the fallback for missing characters itself.
+        system_font_fallback: false,
         ..Default::default()
     };
     eframe::run_native(
