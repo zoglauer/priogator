@@ -578,8 +578,7 @@ mod tests {
         aa.update_task(id, |t| t.title = "newer".into());
         // Both edits can fall in the same clock tick; make the order explicit.
         let stamp = zz.tasks[&id].meta.updated_at;
-        aa.tasks.get_mut(&id).unwrap().meta.updated_at =
-            stamp + jiff::SignedDuration::from_secs(1);
+        aa.tasks.get_mut(&id).unwrap().meta.updated_at = stamp + jiff::SignedDuration::from_secs(1);
         newer.save(&aa).unwrap();
         SyncFolder::new(dir.path(), "zz").save(&zz).unwrap();
 

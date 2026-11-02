@@ -8,42 +8,9 @@ Installing Priogator
 3. Open Priogator from your Applications folder (or with Spotlight: ⌘ Space,
    type "Priogator").
 
-
-The first start: "Priogator Not Opened"
----------------------------------------
-
-Priogator is free software and not registered with Apple, so the first time
-macOS shows a warning ("Apple could not verify Priogator is free of
-malware…") and refuses to open it. You have to allow it once:
-
-1. Click "Done" in the warning.
-
-   Do NOT click "Move to Trash". That deletes the app. (If it happened:
-   take it out of the Trash, or drag it from the disk image into
-   Applications again.)
-
-2. Open System Settings → Privacy & Security.
-
-3. Scroll down to the Security section. Next to "Priogator was blocked to
-   protect your Mac" click "Open Anyway".
-
-4. Confirm with "Open Anyway" again and enter your password (or use
-   Touch ID).
-
-From then on Priogator opens normally.
-
-On older macOS versions (before macOS 15) you can instead right-click
-Priogator in Applications, choose "Open", and click "Open" in the dialog.
-
-
-Alternative: with the Terminal
-------------------------------
-
-Open the Terminal app and run:
-
-    xattr -dr com.apple.quarantine /Applications/Priogator.app
-
-Then open Priogator normally.
+The first time, macOS asks whether you want to open an app downloaded from
+the internet: click "Open". Priogator is signed by its developer and
+checked by Apple.
 
 
 Help

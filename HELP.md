@@ -45,8 +45,9 @@ Each area has, from top to bottom:
    tasks, by date until you drag them into an order of your own.
 3. **Priorities:** all other open tasks, in the order you've set (most
    important at the top).
-4. **DONE (n):** tasks completed in the last 7 days, folded away. Click to
-   open.
+4. **DONE IN THE LAST 7 DAYS (n):** tasks completed in that time, folded
+   away. Click to open. The days follow the setting (*DONE TODAY* for one
+   day).
 5. **Groups row:** which group is shown (**All ▾**) and **+ New**.
 
 If there are more areas than fit the window, scroll sideways. The area
@@ -208,8 +209,8 @@ from the priority list into the top section puts it exactly where you let go.
 - **Edit:** double-click a task, or select it and press **Enter**, or
   right-click → **Edit…**. You can change the title, notes, subtasks, area,
   group, deadline and pinning. The first line of the notes shows under the title.
-- **Done:** tick the checkbox. The task moves to **DONE (n)** at the bottom of
-  the area. Untick it there, or right-click → **Reopen**, to bring it back.
+- **Done:** tick the checkbox. The task moves to **DONE IN THE LAST … DAYS**
+  at the bottom of the area. Untick it there, or right-click → **Reopen**, to bring it back.
   Done tasks stay visible for 7 days and are hidden after that. Change this
   under **Done tasks stay visible for** in Settings. Hidden tasks aren't
   deleted: they stay in your data and backups, and a longer setting shows
@@ -458,7 +459,7 @@ If you sync with Syncthing, point its shared folder to the new path.
 
 1. Is a group filter on? The area's **Groups** button shows a group instead
    of **All**.
-2. Is the task done? Look under **DONE (n)**. Tasks done more than 7 days
+2. Is the task done? Look under **DONE IN THE LAST … DAYS**. Tasks done more than 7 days
    ago are hidden; raise *Done tasks stay visible for* in Settings to see them.
 3. Did its deadline come close? Then it moved up to the top section.
 4. Otherwise press ⌘Z, or restore yesterday's backup.

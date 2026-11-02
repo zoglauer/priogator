@@ -1,5 +1,6 @@
-# On a tag like v1.2.3: build a universal macOS app, pack it into a DMG and
-# attach it to a GitHub release for that tag.
+# On a tag like v1.2.3: build a universal macOS app, sign it with the
+# Developer ID from the repo secrets, pack it into a DMG, have Apple notarize
+# it, and attach it to a GitHub release for that tag.
 name: Release
 
 on:
@@ -27,7 +28,33 @@ jobs:
       - name: Test
         run: cargo test
 
-      - name: Build DMG
+      # The Developer ID certificate from the repo secrets, in a keychain of
+      # its own that lives only as long as this run.
+      - name: Import signing certificate
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(uuidgen)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
+            -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" \
+            $(security list-keychains -d user | tr -d '"')
+
+      - name: Build, sign and notarize DMG
+        env:
+          REQUIRE_SIGNING: 1
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: VERSION="${GITHUB_REF_NAME#v}" scripts/bundle-macos.sh --release
 
       - name: Publish release

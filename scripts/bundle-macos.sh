@@ -5,6 +5,15 @@
 #   scripts/bundle-macos.sh --release  universal app (Apple Silicon + Intel)
 #                                      packed into target/release/Priogator-<version>.dmg
 # VERSION=1.2.3 overrides the version from Cargo.toml.
+#
+# Signing: with a "Developer ID Application" certificate in the keychain the
+# app is signed with it (hardened runtime); otherwise ad hoc, which runs only
+# on this Mac. SIGN_IDENTITY overrides the choice; REQUIRE_SIGNING=1 fails
+# without a certificate (for release builds on GitHub).
+# Notarizing (--release with a Developer ID): Apple checks the DMG and its
+# approval is stapled to it, so it opens without warnings anywhere. Uses
+# APPLE_ID, APPLE_TEAM_ID and APPLE_APP_PASSWORD if set, otherwise the
+# keychain profile from `xcrun notarytool store-credentials priogator`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # rustup puts cargo here; not every shell has it on PATH.
@@ -59,8 +68,19 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc signature, required to run on Apple Silicon.
-codesign --force --sign - "$app"
+identity=${SIGN_IDENTITY:-$(security find-identity -v -p codesigning |
+    sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)}
+if [[ -n "$identity" ]]; then
+    codesign --force --options runtime --timestamp --sign "$identity" "$app"
+    echo "Signed with $identity"
+elif [[ "${REQUIRE_SIGNING:-}" == 1 ]]; then
+    echo "No Developer ID certificate found, but REQUIRE_SIGNING=1." >&2
+    exit 1
+else
+    # Ad-hoc signature: required to run on Apple Silicon, valid on this Mac only.
+    codesign --force --sign - "$app"
+    echo "Signed ad hoc (no Developer ID certificate found)"
+fi
 echo "Built $app"
 
 if [[ "$mode" == "--release" ]]; then
@@ -74,6 +94,26 @@ if [[ "$mode" == "--release" ]]; then
         -ov -format UDZO "$dmg" >/dev/null
     rm -rf "$staging"
     echo "Built $dmg"
+
+    if [[ -n "$identity" ]]; then
+        codesign --force --timestamp --sign "$identity" "$dmg"
+        if [[ -n "${APPLE_ID:-}" && -n "${APPLE_TEAM_ID:-}" && -n "${APPLE_APP_PASSWORD:-}" ]]; then
+            credentials=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD")
+        else
+            credentials=(--keychain-profile "${NOTARY_PROFILE:-priogator}")
+        fi
+        echo "Notarizing (Apple checks the DMG; usually a few minutes)…"
+        result=$(xcrun notarytool submit "$dmg" "${credentials[@]}" --wait 2>&1) || true
+        echo "$result"
+        if ! grep -q "status: Accepted" <<<"$result"; then
+            id=$(sed -n 's/^ *id: //p' <<<"$result" | head -1)
+            [[ -n "$id" ]] && xcrun notarytool log "$id" "${credentials[@]}" || true
+            echo "Notarization failed." >&2
+            exit 1
+        fi
+        xcrun stapler staple "$dmg"
+        echo "Notarized $dmg"
+    fi
 fi
 
 if [[ "$mode" == "--install" ]]; then

@@ -1226,7 +1226,7 @@ impl PriogatorApp {
                 if !done.is_empty() {
                     ui.add_space(8.0);
                     egui::CollapsingHeader::new(
-                        RichText::new(format!("DONE ({})", done.len()))
+                        RichText::new(done_heading(self.config.done_days, done.len()))
                             .small()
                             .weak(),
                     )
@@ -3348,6 +3348,16 @@ fn drag_ghost(ctx: &egui::Context, text: &str) {
 }
 
 /// "1 group", "3 groups".
+/// "DONE IN THE LAST 7 DAYS (2)", or "DONE TODAY (2)" for a one-day window
+/// (as the toolbar says it).
+fn done_heading(days: i64, count: usize) -> String {
+    if days == 1 {
+        format!("DONE TODAY ({count})")
+    } else {
+        format!("DONE IN THE LAST {days} DAYS ({count})")
+    }
+}
+
 fn plural(n: usize, word: &str) -> String {
     if n == 1 {
         format!("1 {word}")

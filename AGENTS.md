@@ -225,11 +225,16 @@ The tag push starts GitHub Actions (`release.yml`, macOS runner): tests,
 universal `Priogator-X.Y.Z.dmg`, attached to the release with
 `.github/release-notes.md`.
 
-The app is ad-hoc signed, not notarized: downloaders need "Open Anyway" or
-`xattr -dr com.apple.quarantine`. The DMG contains "Read Me First.txt"
-(from `assets/dmg-read-me-first.txt`) explaining install and first start;
-keep it and `.github/release-notes.md` in line. Notarization would need an Apple
-Developer ID. Bundle id: `com.andreaszoglauer.priogator`.
+Signing: `bundle-macos.sh` signs with the owner's "Developer ID Application:
+ANDREAS CHRISTIAN ZOGLAUER (Z86A9UVWNP)" (hardened runtime, no
+entitlements needed) when it's in the keychain, else ad hoc. `--release`
+also signs the DMG, notarizes it (`notarytool`, keychain profile
+`priogator` locally; APPLE_ID / APPLE_TEAM_ID / APPLE_APP_PASSWORD secrets on
+GitHub) and staples it. The workflow imports MACOS_CERTIFICATE (+ password)
+into a temporary keychain and sets REQUIRE_SIGNING=1, so an unsigned DMG is
+never released. Each build is notarized anew (automatic, a few minutes).
+The DMG's "Read Me First.txt" (`assets/dmg-read-me-first.txt`) and
+`.github/release-notes.md` say how to install; keep them in line.
 
 ## Open ideas (not started)
 
