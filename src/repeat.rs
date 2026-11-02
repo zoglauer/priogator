@@ -267,4 +267,195 @@ mod tests {
         let back: Repeat = serde_json::from_str(&json).unwrap();
         assert_eq!(back, weekly(&[5]));
     }
+
+    fn schedule(every: u32, unit: Unit) -> Repeat {
+        Repeat::Schedule {
+            every,
+            unit,
+            weekdays: vec![],
+        }
+    }
+
+    #[test]
+    fn every_zero_counts_as_every_one() {
+        let day = date(2026, 11, 2);
+        assert_eq!(schedule(0, Unit::Days).next(day, day), date(2026, 11, 3));
+        let zero = Repeat::AfterDone {
+            every: 0,
+            unit: Unit::Weeks,
+        };
+        assert_eq!(zero.next(day, day), date(2026, 11, 9));
+    }
+
+    #[test]
+    fn leap_days_and_month_ends() {
+        // Jan 31 in a leap year: Feb 29.
+        let monthly = schedule(1, Unit::Months);
+        assert_eq!(
+            monthly.next(date(2028, 1, 31), date(2028, 1, 31)),
+            date(2028, 2, 29)
+        );
+        // A yearly task on Feb 29 lands on Feb 28 in other years.
+        let yearly = schedule(1, Unit::Years);
+        assert_eq!(
+            yearly.next(date(2028, 2, 29), date(2028, 2, 29)),
+            date(2029, 2, 28)
+        );
+        // Every 3 months from the 30th of November.
+        let quarterly = schedule(3, Unit::Months);
+        assert_eq!(
+            quarterly.next(date(2026, 11, 30), date(2026, 11, 30)),
+            date(2027, 2, 28)
+        );
+    }
+
+    #[test]
+    fn missed_occurrences_are_skipped_for_every_unit() {
+        let today = date(2026, 10, 29);
+        let every_three_days = schedule(3, Unit::Days);
+        // Oct 1 + 30 days is the first date after today.
+        assert_eq!(
+            every_three_days.next(date(2026, 10, 1), today),
+            date(2026, 10, 31)
+        );
+        let monthly = schedule(1, Unit::Months);
+        assert_eq!(monthly.next(date(2026, 1, 15), today), date(2026, 11, 15));
+        let yearly = schedule(1, Unit::Years);
+        assert_eq!(yearly.next(date(2020, 3, 1), today), date(2027, 3, 1));
+    }
+
+    #[test]
+    fn a_future_due_date_moves_one_step_on() {
+        // Done early, long before the due date: the next date after that.
+        let weekly = schedule(1, Unit::Weeks);
+        assert_eq!(
+            weekly.next(date(2026, 12, 4), date(2026, 10, 29)),
+            date(2026, 12, 11)
+        );
+    }
+
+    #[test]
+    fn after_done_ignores_the_due_date() {
+        let today = date(2026, 10, 29);
+        let after = Repeat::AfterDone {
+            every: 10,
+            unit: Unit::Days,
+        };
+        for due in [date(2026, 1, 1), today, date(2027, 6, 1)] {
+            assert_eq!(after.next(due, today), date(2026, 11, 8));
+        }
+        let yearly = Repeat::AfterDone {
+            every: 1,
+            unit: Unit::Years,
+        };
+        assert_eq!(yearly.next(today, today), date(2027, 10, 29));
+    }
+
+    #[test]
+    fn weekdays_may_come_unsorted_duplicated_or_invalid() {
+        let messy = weekly(&[5, 1, 1, 9, 0]);
+        assert_eq!(messy.summary(), "Every Mon, Fri");
+        let monday = date(2026, 11, 2);
+        assert_eq!(messy.next(monday, monday), date(2026, 11, 6));
+        let friday = date(2026, 11, 6);
+        assert_eq!(messy.next(friday, friday), date(2026, 11, 9));
+    }
+
+    #[test]
+    fn only_invalid_weekdays_still_moves_on() {
+        let nonsense = weekly(&[9]);
+        let monday = date(2026, 11, 2);
+        let next = nonsense.next(monday, monday);
+        assert!(next > monday, "{next}");
+        assert_eq!(nonsense.summary(), "Every week");
+    }
+
+    #[test]
+    fn sundays_end_the_week() {
+        let sunday = date(2026, 11, 1);
+        assert_eq!(weekly(&[7]).next(sunday, sunday), date(2026, 11, 8));
+        assert_eq!(weekly(&[1, 7]).next(sunday, sunday), date(2026, 11, 2));
+        // From Saturday, Sunday is still this week.
+        let saturday = date(2026, 10, 31);
+        assert_eq!(weekly(&[7]).next(saturday, saturday), sunday);
+    }
+
+    #[test]
+    fn every_other_week_with_several_days() {
+        let mon_thu = Repeat::Schedule {
+            every: 2,
+            unit: Unit::Weeks,
+            weekdays: vec![1, 4],
+        };
+        let monday = date(2026, 11, 2);
+        // Thursday of the same week, then Monday two weeks on.
+        assert_eq!(mon_thu.next(monday, monday), date(2026, 11, 5));
+        let thursday = date(2026, 11, 5);
+        assert_eq!(mon_thu.next(thursday, thursday), date(2026, 11, 16));
+        assert_eq!(mon_thu.summary(), "Every 2 weeks on Mon, Thu");
+    }
+
+    #[test]
+    fn summaries_for_every_kind() {
+        let cases = [
+            (schedule(1, Unit::Days), "Every day"),
+            (schedule(3, Unit::Days), "Every 3 days"),
+            (schedule(1, Unit::Weeks), "Every week"),
+            (schedule(2, Unit::Weeks), "Every 2 weeks"),
+            (schedule(6, Unit::Months), "Every 6 months"),
+            (schedule(1, Unit::Years), "Every year"),
+            (weekly(&[1, 2, 3, 4, 5]), "Every Mon, Tue, Wed, Thu, Fri"),
+            (
+                Repeat::AfterDone {
+                    every: 1,
+                    unit: Unit::Weeks,
+                },
+                "1 week after done",
+            ),
+            (
+                Repeat::AfterDone {
+                    every: 3,
+                    unit: Unit::Days,
+                },
+                "3 days after done",
+            ),
+            (
+                Repeat::AfterDone {
+                    every: 1,
+                    unit: Unit::Years,
+                },
+                "1 year after done",
+            ),
+        ];
+        for (repeat, text) in cases {
+            assert_eq!(repeat.summary(), text);
+        }
+    }
+
+    #[test]
+    fn unit_names_are_singular_for_one() {
+        for unit in Unit::ALL {
+            assert!(!unit.name(1).ends_with('s'), "{:?}", unit);
+            assert!(unit.name(2).ends_with('s'), "{:?}", unit);
+            assert!(unit.name(0).ends_with('s'), "{:?}", unit);
+        }
+    }
+
+    #[test]
+    fn after_done_and_old_schedules_load_from_json() {
+        let after: Repeat =
+            serde_json::from_str(r#"{"kind":"after_done","every":2,"unit":"months"}"#).unwrap();
+        assert_eq!(
+            after,
+            Repeat::AfterDone {
+                every: 2,
+                unit: Unit::Months
+            }
+        );
+        // Written without weekdays.
+        let plain: Repeat =
+            serde_json::from_str(r#"{"kind":"schedule","every":1,"unit":"days"}"#).unwrap();
+        assert_eq!(plain, schedule(1, Unit::Days));
+        assert!(serde_json::from_str::<Repeat>(r#"{"kind":"hourly","every":1}"#).is_err());
+    }
 }

@@ -84,3 +84,94 @@ pub fn fill(board: &mut Board, today: Date) {
     let done = board.add_task(family, "Book dentist appointment", None, None);
     board.set_done(done, true);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jiff::civil::date;
+
+    const TODAY: Date = date(2026, 10, 29);
+
+    fn demo() -> Board {
+        let mut board = Board::new("demo");
+        board.today = TODAY;
+        board.add_default_areas();
+        fill(&mut board, TODAY);
+        board
+    }
+
+    #[test]
+    fn every_area_gets_tasks() {
+        let board = demo();
+        for area in board.areas_sorted() {
+            let id = area.meta.id;
+            let open = board.top_list(id).len() + board.priority_list(id).len();
+            assert!(open > 0, "{} is empty", area.name);
+        }
+    }
+
+    #[test]
+    fn filling_twice_adds_nothing() {
+        let mut board = demo();
+        let before = board.clone();
+        fill(&mut board, TODAY);
+        assert_eq!(board, before);
+    }
+
+    #[test]
+    fn a_board_with_tasks_is_left_alone() {
+        let mut board = Board::new("demo");
+        board.add_default_areas();
+        let area = board.areas_sorted()[0].meta.id;
+        board.add_task(area, "mine", None, None);
+        fill(&mut board, TODAY);
+        assert_eq!(board.tasks.len(), 1);
+        assert!(board.groups.is_empty());
+    }
+
+    #[test]
+    fn fewer_than_four_areas_get_nothing() {
+        let mut board = Board::new("demo");
+        board.add_area("Only one");
+        fill(&mut board, TODAY);
+        assert!(board.tasks.is_empty());
+    }
+
+    #[test]
+    fn the_data_is_consistent() {
+        let board = demo();
+        for task in board.tasks.values() {
+            assert!(board.areas.contains_key(&task.area), "{}", task.title);
+            if let Some(group) = task.group {
+                assert_eq!(board.groups[&group].area, task.area, "{}", task.title);
+            }
+            assert!(!task.title.is_empty());
+        }
+        let titles: Vec<&str> = board.tasks.values().map(|t| t.title.as_str()).collect();
+        let mut unique = titles.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), titles.len(), "titles are distinct");
+    }
+
+    #[test]
+    fn it_shows_off_every_kind_of_task() {
+        let board = demo();
+        let tasks: Vec<_> = board.tasks.values().filter(|t| !t.meta.deleted).collect();
+        assert!(tasks.iter().any(|t| board.overdue(t)), "overdue");
+        assert!(tasks.iter().any(|t| t.pinned), "pinned");
+        assert!(tasks.iter().any(|t| !t.subtasks.is_empty()), "subtasks");
+        assert!(tasks.iter().any(|t| t.done), "done");
+        assert!(
+            tasks
+                .iter()
+                .any(|t| matches!(t.repeat, Some(Repeat::Schedule { .. })))
+        );
+        assert!(
+            tasks
+                .iter()
+                .any(|t| matches!(t.repeat, Some(Repeat::AfterDone { .. })))
+        );
+        assert!(tasks.iter().any(|t| t.deadline == Some(TODAY)), "due today");
+    }
+}

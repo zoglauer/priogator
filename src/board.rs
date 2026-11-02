@@ -762,7 +762,14 @@ fn restore_records<T: Versioned + Clone + PartialEq>(
             current.insert(*id, record);
             continue;
         };
-        if now != old {
+        // Only records whose content (or deletion) differs; the version stamp
+        // alone isn't a change worth syncing.
+        let mut unstamped = now.clone();
+        *unstamped.meta_mut() = crate::model::Meta {
+            deleted: now.meta().deleted,
+            ..old.meta().clone()
+        };
+        if unstamped != *old {
             let mut record = old.clone();
             // Continue from the newest timestamp, so the restore is the latest change.
             record.meta_mut().updated_at = now.meta().updated_at.max(old.meta().updated_at);
@@ -1436,5 +1443,687 @@ mod tests {
         // The next occurrence of a recurring task has it too.
         b.set_done(id, true);
         assert_eq!(b.tasks[&successor_id(id)].color, Some(TASK_COLORS[3]));
+    }
+
+    // ----- Done, reopen, skip ---------------------------------------------
+
+    #[test]
+    fn done_tasks_leave_the_lists_and_can_be_reopened() {
+        let (mut b, area) = board_with_area("mac");
+        let id = b.add_task(area, "task", None, Some(TODAY));
+        b.set_done(id, true);
+        assert!(b.top_list(area).is_empty() && b.priority_list(area).is_empty());
+        assert_eq!(b.done_list(area).len(), 1);
+        assert!(b.tasks[&id].completed_at.is_some());
+        assert!(!b.overdue(&b.tasks[&id]) && !b.urgent(&b.tasks[&id]));
+
+        b.set_done(id, false);
+        b.set_done(id, false);
+        assert_eq!(b.tasks[&id].completed_at, None);
+        assert!(b.done_list(area).is_empty());
+        assert_eq!(top_titles(&b, area), ["task"]);
+    }
+
+    #[test]
+    fn done_tasks_are_listed_most_recent_first() {
+        let (mut b, area) = board_with_area("mac");
+        let first = b.add_task(area, "first", None, None);
+        let second = b.add_task(area, "second", None, None);
+        b.set_done(first, true);
+        b.set_done(second, true);
+        let earlier = Timestamp::now() - jiff::SignedDuration::from_hours(1);
+        b.update_task(first, |t| t.completed_at = Some(earlier));
+        let done: Vec<&str> = b.done_list(area).iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(done, ["second", "first"]);
+    }
+
+    #[test]
+    fn skipping_a_plain_task_changes_nothing() {
+        let (mut b, area) = board_with_area("mac");
+        let id = b.add_task(area, "plain", None, Some(date(2026, 11, 2)));
+        b.skip(id);
+        assert_eq!(b.tasks[&id].deadline, Some(date(2026, 11, 2)));
+        assert!(!b.tasks[&id].done);
+    }
+
+    fn weekly(b: &mut Board, id: Uuid) {
+        let mut details = TaskDetails::from(&b.tasks[&id]);
+        details.repeat = Some(Repeat::Schedule {
+            every: 1,
+            unit: crate::repeat::Unit::Weeks,
+            weekdays: vec![],
+        });
+        b.update_details(id, details);
+    }
+
+    #[test]
+    fn the_next_occurrence_starts_fresh_but_keeps_the_rest() {
+        let (mut b, area) = board_with_area("mac");
+        let group = b.add_group(area, "Home", GROUP_COLORS[0]);
+        let id = b.add_task(area, "trash", Some(group), Some(TODAY));
+        let step = b.add_subtask(id, "bins out");
+        b.set_subtask_done(id, step, true);
+        b.update_task(id, |t| {
+            t.notes = "blue bin".into();
+            t.pinned = true;
+            t.lead_days = Some(1);
+        });
+        weekly(&mut b, id);
+        b.set_done(id, true);
+
+        let next = &b.tasks[&successor_id(id)];
+        assert_eq!(next.deadline, Some(date(2026, 11, 5)));
+        assert!(!next.done && next.completed_at.is_none());
+        assert!(next.subtasks.iter().all(|s| !s.done), "subtasks unticked");
+        assert_eq!(next.subtasks[0].title, "bins out");
+        assert_eq!(next.group, Some(group));
+        assert_eq!(next.notes, "blue bin");
+        assert!(next.pinned);
+        assert_eq!(next.lead_days, Some(1));
+        // The done one keeps its ticks.
+        assert!(b.tasks[&id].subtasks[0].done);
+    }
+
+    #[test]
+    fn reopening_removes_the_next_occurrence_and_redoing_brings_it_back() {
+        let (mut b, area) = board_with_area("mac");
+        let id = b.add_task(area, "trash", None, Some(TODAY));
+        weekly(&mut b, id);
+        b.set_done(id, true);
+        let next = successor_id(id);
+        assert!(!b.tasks[&next].meta.deleted);
+        b.set_done(id, false);
+        assert!(b.tasks[&next].meta.deleted);
+        assert_eq!(b.top_list(area).len(), 1);
+        b.set_done(id, true);
+        assert!(!b.tasks[&next].meta.deleted, "the same record again");
+        assert_eq!(b.tasks.len(), 2);
+    }
+
+    #[test]
+    fn a_chain_of_occurrences_gets_new_ids() {
+        let (mut b, area) = board_with_area("mac");
+        let first = b.add_task(area, "trash", None, Some(TODAY));
+        weekly(&mut b, first);
+        b.set_done(first, true);
+        let second = successor_id(first);
+        b.set_done(second, true);
+        let third = successor_id(second);
+        assert_ne!(third, first);
+        assert_eq!(b.tasks[&third].deadline, Some(date(2026, 11, 12)));
+        assert_eq!(b.tasks.values().filter(|t| !t.done).count(), 1);
+    }
+
+    #[test]
+    fn reopening_keeps_an_edited_next_occurrence_if_done_already() {
+        let (mut b, area) = board_with_area("mac");
+        let id = b.add_task(area, "trash", None, Some(TODAY));
+        weekly(&mut b, id);
+        b.set_done(id, true);
+        let next = successor_id(id);
+        b.set_done(next, true);
+        // Reopening the first doesn't throw away the one already done.
+        b.set_done(id, false);
+        assert!(!b.tasks[&next].meta.deleted);
+    }
+
+    // ----- Subtasks and edits ---------------------------------------------
+
+    #[test]
+    fn unknown_ids_are_ignored() {
+        let (mut b, area) = board_with_area("mac");
+        let id = b.add_task(area, "task", None, None);
+        let before = b.clone();
+        let nobody = Uuid::new_v4();
+        b.update_task(nobody, |t| t.title = "x".into());
+        b.set_done(nobody, true);
+        b.skip(nobody);
+        b.delete_task(nobody);
+        b.set_subtask_done(id, nobody, true);
+        b.set_subtask_done(nobody, nobody, true);
+        b.update_details(nobody, TaskDetails::from(&before.tasks[&id]));
+        b.move_in_top(nobody, area, 0);
+        b.rename_area(nobody, "x");
+        b.update_group(nobody, "x", [0, 0, 0]);
+        b.delete_group(nobody);
+        b.move_group(nobody, area);
+        b.move_area(nobody, 0);
+        b.shift_area(nobody, 1);
+        // Only the unknown subtask's task got touched, nothing else changed.
+        let mut after = b.clone();
+        after.tasks.get_mut(&id).unwrap().meta = before.tasks[&id].meta.clone();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn edits_are_trimmed_and_empty_subtasks_dropped() {
+        let (mut b, area) = board_with_area("mac");
+        let id = b.add_task(area, "  spaced  ", None, None);
+        assert_eq!(b.tasks[&id].title, "spaced");
+        let mut details = TaskDetails::from(&b.tasks[&id]);
+        details.title = "  new title \n".into();
+        details.subtasks = vec![
+            Subtask::new("keep"),
+            Subtask::new("   "),
+            Subtask {
+                title: "  padded ".into(),
+                ..Subtask::new("x")
+            },
+        ];
+        b.update_details(id, details);
+        let t = &b.tasks[&id];
+        assert_eq!(t.title, "new title");
+        let subtasks: Vec<&str> = t.subtasks.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(subtasks, ["keep", "padded"]);
+    }
+
+    #[test]
+    fn saving_unchanged_details_keeps_the_task_where_it_is() {
+        let (mut b, area) = board_with_area("mac");
+        b.add_task(area, "a", None, None);
+        let id = b.add_task(area, "b", None, None);
+        b.add_task(area, "c", None, None);
+        b.update_details(id, TaskDetails::from(&b.tasks[&id]));
+        assert_eq!(titles(&b, area), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_group_from_another_area_is_dropped_on_save() {
+        let (mut b, work) = board_with_area("mac");
+        let house = b.areas_sorted()[2].meta.id;
+        let garden = b.add_group(house, "Garden", GROUP_COLORS[0]);
+        let id = b.add_task(work, "task", None, None);
+        let mut details = TaskDetails::from(&b.tasks[&id]);
+        details.group = Some(garden);
+        b.update_details(id, details.clone());
+        assert_eq!(b.tasks[&id].group, None);
+        // Moving it to that area with the group keeps it.
+        details.area = house;
+        b.update_details(id, details);
+        assert_eq!(b.tasks[&id].group, Some(garden));
+    }
+
+    #[test]
+    fn a_deleted_group_cannot_be_chosen() {
+        let (mut b, area) = board_with_area("mac");
+        let group = b.add_group(area, "Old", GROUP_COLORS[0]);
+        b.delete_group(group);
+        let id = b.add_task(area, "task", None, None);
+        let mut details = TaskDetails::from(&b.tasks[&id]);
+        details.group = Some(group);
+        b.update_details(id, details);
+        assert_eq!(b.tasks[&id].group, None);
+    }
+
+    #[test]
+    fn moving_a_task_to_another_area_in_the_editor_puts_it_at_the_bottom() {
+        let (mut b, work) = board_with_area("mac");
+        let house = b.areas_sorted()[2].meta.id;
+        b.add_task(house, "h1", None, None);
+        b.add_task(house, "h2", None, None);
+        let id = b.add_task(work, "moved", None, None);
+        let mut details = TaskDetails::from(&b.tasks[&id]);
+        details.area = house;
+        b.update_details(id, details);
+        assert_eq!(titles(&b, house), ["h1", "h2", "moved"]);
+        assert!(titles(&b, work).is_empty());
+    }
+
+    #[test]
+    fn subtasks_of_other_tasks_are_left_alone() {
+        let (mut b, area) = board_with_area("mac");
+        let a = b.add_task(area, "a", None, None);
+        let other = b.add_task(area, "b", None, None);
+        let step = b.add_subtask(a, "step");
+        b.set_subtask_done(other, step, true);
+        assert!(!b.tasks[&a].subtasks[0].done);
+    }
+
+    // ----- Top section, pinning, moving -----------------------------------
+
+    #[test]
+    fn pinning_into_another_area_drops_a_foreign_group() {
+        let (mut b, work) = board_with_area("mac");
+        let house = b.areas_sorted()[2].meta.id;
+        let clients = b.add_group(work, "Clients", GROUP_COLORS[0]);
+        let stays = b.add_task(work, "stays", Some(clients), None);
+        let moves = b.add_task(work, "moves", Some(clients), None);
+        b.pin(stays, work);
+        b.pin(moves, house);
+        assert_eq!(b.tasks[&stays].group, Some(clients));
+        assert_eq!(b.tasks[&moves].group, None);
+        assert_eq!(top_titles(&b, house), ["moves"]);
+    }
+
+    #[test]
+    fn moving_into_the_list_unpins_and_forgets_the_top_position() {
+        let (mut b, area) = board_with_area("mac");
+        let id = b.add_task(area, "pinned", None, None);
+        b.move_in_top(id, area, 0);
+        assert!(b.tasks[&id].pinned && b.tasks[&id].top_rank.is_some());
+        b.move_task(id, area, 0);
+        let t = &b.tasks[&id];
+        assert!(!t.pinned);
+        assert_eq!(t.top_rank, None);
+        assert_eq!(titles(&b, area), ["pinned"]);
+    }
+
+    #[test]
+    fn a_position_past_the_end_means_the_end() {
+        let (mut b, area) = board_with_area("mac");
+        b.add_task(area, "a", None, None);
+        let id = b.add_task(area, "b", None, None);
+        b.add_task(area, "c", None, None);
+        b.move_task(id, area, 99);
+        assert_eq!(titles(&b, area), ["a", "c", "b"]);
+        let top1 = b.add_task(area, "t1", None, Some(TODAY));
+        b.add_task(area, "t2", None, Some(TODAY));
+        b.move_in_top(top1, area, 99);
+        assert_eq!(top_titles(&b, area), ["t2", "t1"]);
+    }
+
+    #[test]
+    fn a_task_due_soon_is_not_pinned_by_arranging_it() {
+        let (mut b, area) = board_with_area("mac");
+        let due = b.add_task(area, "due", None, Some(TODAY));
+        b.add_task(area, "also", None, Some(date(2026, 10, 30)));
+        b.move_in_top(due, area, 1);
+        assert!(!b.tasks[&due].pinned);
+        assert_eq!(top_titles(&b, area), ["also", "due"]);
+    }
+
+    #[test]
+    fn dragging_into_another_areas_top_moves_it_there() {
+        let (mut b, work) = board_with_area("mac");
+        let house = b.areas_sorted()[2].meta.id;
+        let id = b.add_task(work, "task", None, None);
+        b.move_in_top(id, house, 0);
+        assert_eq!(b.tasks[&id].area, house);
+        assert!(b.tasks[&id].pinned);
+        assert_eq!(top_titles(&b, house), ["task"]);
+    }
+
+    #[test]
+    fn arranged_tasks_come_before_unarranged_ones() {
+        let (mut b, area) = board_with_area("mac");
+        b.add_task(area, "soon", None, Some(date(2026, 10, 30)));
+        let pinned = b.add_task(area, "pinned", None, None);
+        b.move_in_top(pinned, area, 0);
+        // A new due task appears after the arranged ones, though it's sooner.
+        b.add_task(area, "today", None, Some(TODAY));
+        assert_eq!(top_titles(&b, area), ["pinned", "soon", "today"]);
+    }
+
+    #[test]
+    fn a_recurring_task_dragged_into_the_list_keeps_its_date() {
+        let (mut b, area) = board_with_area("mac");
+        let id = b.add_task(area, "trash", None, Some(TODAY));
+        weekly(&mut b, id);
+        b.move_task(id, area, 0);
+        assert_eq!(b.tasks[&id].deadline, Some(TODAY));
+    }
+
+    // ----- Deadlines and lead times ---------------------------------------
+
+    #[test]
+    fn a_lead_time_of_zero_means_only_on_the_day() {
+        let (mut b, area) = board_with_area("mac");
+        let tomorrow = b.add_task(area, "tomorrow", None, Some(date(2026, 10, 30)));
+        b.update_task(tomorrow, |t| t.lead_days = Some(0));
+        assert!(b.top_list(area).is_empty());
+        b.today = date(2026, 10, 30);
+        assert_eq!(top_titles(&b, area), ["tomorrow"]);
+    }
+
+    #[test]
+    fn the_app_wide_horizon_applies_to_tasks_without_their_own() {
+        let (mut b, area) = board_with_area("mac");
+        b.add_task(area, "in 5 days", None, Some(date(2026, 11, 3)));
+        b.add_task(area, "in 10 days", None, Some(date(2026, 11, 8)));
+        b.add_task(area, "in 11 days", None, Some(date(2026, 11, 9)));
+        assert_eq!(top_titles(&b, area), ["in 5 days", "in 10 days"]);
+        b.horizon_days = 3;
+        assert!(b.top_list(area).is_empty());
+        b.horizon_days = 0;
+        assert!(b.top_list(area).is_empty());
+    }
+
+    #[test]
+    fn overdue_and_urgent() {
+        let (mut b, area) = board_with_area("mac");
+        let past = b.add_task(area, "past", None, Some(date(2026, 10, 28)));
+        let today = b.add_task(area, "today", None, Some(TODAY));
+        let later = b.add_task(area, "later", None, Some(date(2026, 10, 30)));
+        let none = b.add_task(area, "none", None, None);
+        let t = |id| &b.tasks[&id];
+        assert!(b.overdue(t(past)) && b.urgent(t(past)));
+        assert!(!b.overdue(t(today)) && b.urgent(t(today)));
+        assert!(!b.overdue(t(later)) && !b.urgent(t(later)));
+        assert!(!b.overdue(t(none)) && !b.urgent(t(none)));
+    }
+
+    // ----- Statistics -----------------------------------------------------
+
+    #[test]
+    fn stats_skip_deleted_tasks_and_areas() {
+        let (mut b, work) = board_with_area("mac");
+        let house = b.areas_sorted()[2].meta.id;
+        b.add_task(work, "open", None, None);
+        let gone = b.add_task(work, "deleted", None, Some(date(2026, 10, 1)));
+        b.delete_task(gone);
+        b.add_task(house, "in a deleted area", None, Some(date(2026, 10, 1)));
+        b.delete_area(house);
+        let stats = b.stats(TODAY);
+        assert_eq!(stats.open, 1);
+        assert!(stats.overdue.is_empty());
+    }
+
+    #[test]
+    fn this_week_means_the_next_seven_days() {
+        let (mut b, area) = board_with_area("mac");
+        let today = b.add_task(area, "today", None, Some(TODAY));
+        let seven = b.add_task(area, "in 7", None, Some(date(2026, 11, 5)));
+        b.add_task(area, "in 8", None, Some(date(2026, 11, 6)));
+        let late = b.add_task(area, "late b", None, Some(date(2026, 10, 20)));
+        let later = b.add_task(area, "late a", None, Some(date(2026, 10, 20)));
+        let earliest = b.add_task(area, "latest", None, Some(date(2026, 10, 1)));
+        let stats = b.stats(TODAY);
+        assert_eq!(stats.due_this_week, [today, seven]);
+        // Earliest deadline first; same day by title.
+        assert_eq!(stats.overdue, [earliest, later, late]);
+        assert_eq!(stats.open, 6);
+    }
+
+    // ----- Areas ----------------------------------------------------------
+
+    #[test]
+    fn unchanged_area_settings_are_not_a_change() {
+        let (mut b, area) = board_with_area("mac");
+        let before = b.areas[&area].meta.clone();
+        b.set_area_color(area, None);
+        b.set_active_hours(area, None);
+        assert_eq!(b.areas[&area].meta, before, "nothing to sync");
+        b.set_area_color(area, Some([1, 2, 3]));
+        assert!(b.areas[&area].meta.is_newer_than(&before));
+        let colored = b.areas[&area].meta.clone();
+        b.set_area_color(area, Some([1, 2, 3]));
+        assert_eq!(b.areas[&area].meta, colored);
+        b.set_active_hours(area, Some(crate::active::ActiveHours::default()));
+        assert!(b.areas[&area].meta.is_newer_than(&colored));
+    }
+
+    #[test]
+    fn area_names_are_trimmed_and_new_areas_go_last() {
+        let (mut b, work) = board_with_area("mac");
+        b.rename_area(work, "  Job  ");
+        assert_eq!(b.areas[&work].name, "Job");
+        let new = b.add_area(" Hobbies ");
+        let names: Vec<&str> = b.areas_sorted().iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names.last(), Some(&"Hobbies"));
+        assert_eq!(b.areas_sorted().last().unwrap().meta.id, new);
+    }
+
+    #[test]
+    fn area_contents_count_what_a_delete_would_take() {
+        let (mut b, area) = board_with_area("mac");
+        b.add_group(area, "g", GROUP_COLORS[0]);
+        b.add_task(area, "open", None, None);
+        b.add_task(area, "due", None, Some(TODAY));
+        let done = b.add_task(area, "done", None, None);
+        b.set_done(done, true);
+        let gone = b.add_task(area, "gone", None, None);
+        b.delete_task(gone);
+        assert_eq!(b.area_contents(area), (2, 1, 1));
+    }
+
+    #[test]
+    fn a_deleted_area_disappears_on_the_other_device_too() {
+        let (mut mac, area) = board_with_area("mac");
+        mac.add_task(area, "task", None, None);
+        let (mut linux, _) = board_with_area("linux");
+        sync(&mac, &mut linux);
+        mac.delete_area(area);
+        sync(&mac, &mut linux);
+        assert!(linux.areas_sorted().iter().all(|a| a.meta.id != area));
+        assert_eq!(linux.stats(TODAY).open, 0);
+    }
+
+    #[test]
+    fn shifting_past_the_edges_stays_at_the_edge() {
+        let (mut b, work) = board_with_area("mac");
+        b.shift_area(work, -1);
+        assert_eq!(b.areas_sorted()[0].meta.id, work);
+        let family = b.areas_sorted()[3].meta.id;
+        b.shift_area(family, 5);
+        assert_eq!(b.areas_sorted()[3].meta.id, family);
+        b.move_area(work, 99);
+        assert_eq!(b.areas_sorted()[3].meta.id, work);
+    }
+
+    #[test]
+    fn moving_an_area_to_where_it_is_changes_nothing() {
+        let (mut b, work) = board_with_area("mac");
+        b.move_area(work, 0);
+        let before = b.clone();
+        b.move_area(work, 0);
+        assert_eq!(b, before);
+    }
+
+    // ----- Groups ---------------------------------------------------------
+
+    #[test]
+    fn a_deleted_groups_tasks_stay_without_it() {
+        let (mut b, area) = board_with_area("mac");
+        let group = b.add_group(area, "Old", GROUP_COLORS[0]);
+        let id = b.add_task(area, "task", Some(group), None);
+        b.delete_group(group);
+        assert!(b.group(group).is_none());
+        assert!(b.groups_of(area).is_empty());
+        assert_eq!(titles(&b, area), ["task"]);
+        assert!(!b.tasks[&id].meta.deleted);
+    }
+
+    #[test]
+    fn groups_are_listed_by_name_and_can_be_edited() {
+        let (mut b, area) = board_with_area("mac");
+        let z = b.add_group(area, "Zoo", GROUP_COLORS[0]);
+        b.add_group(area, "Admin", GROUP_COLORS[1]);
+        let names: Vec<&str> = b.groups_of(area).iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["Admin", "Zoo"]);
+        b.update_group(z, "  Aardvark ", [9, 9, 9]);
+        assert_eq!(b.groups[&z].name, "Aardvark");
+        assert_eq!(b.groups[&z].color, [9, 9, 9]);
+        assert_eq!(b.groups_of(area)[0].meta.id, z);
+    }
+
+    #[test]
+    fn group_colors_cycle_when_all_are_used() {
+        let (mut b, area) = board_with_area("mac");
+        for (i, color) in GROUP_COLORS.iter().enumerate() {
+            assert_eq!(b.next_group_color(area), *color);
+            b.add_group(area, &format!("g{i}"), *color);
+        }
+        assert_eq!(b.next_group_color(area), GROUP_COLORS[0]);
+        // Other areas' colours don't count.
+        let other = b.areas_sorted()[1].meta.id;
+        assert_eq!(b.next_group_color(other), GROUP_COLORS[0]);
+    }
+
+    #[test]
+    fn moving_a_group_to_its_own_or_an_unknown_area_does_nothing() {
+        let (mut b, area) = board_with_area("mac");
+        let group = b.add_group(area, "g", GROUP_COLORS[0]);
+        b.add_task(area, "t", Some(group), None);
+        let before = b.clone();
+        b.move_group(group, area);
+        b.move_group(group, Uuid::new_v4());
+        assert_eq!(b, before);
+    }
+
+    // ----- Merging --------------------------------------------------------
+
+    #[test]
+    fn equal_timestamps_converge_on_both_devices() {
+        let (mut mac, area) = board_with_area("mac");
+        let id = mac.add_task(area, "task", None, None);
+        let (mut linux, _) = board_with_area("linux");
+        sync(&mac, &mut linux);
+        let stamp = Timestamp::now();
+        mac.update_task(id, |t| t.title = "mac".into());
+        linux.update_task(id, |t| t.title = "linux".into());
+        mac.tasks.get_mut(&id).unwrap().meta.updated_at = stamp;
+        linux.tasks.get_mut(&id).unwrap().meta.updated_at = stamp;
+        let mac_before = mac.clone();
+        sync(&linux, &mut mac);
+        sync(&mac_before, &mut linux);
+        // "mac" > "linux", so mac's version wins everywhere.
+        assert_eq!(mac.tasks[&id].title, "mac");
+        assert_eq!(linux.tasks[&id].title, "mac");
+    }
+
+    #[test]
+    fn an_edit_after_a_delete_brings_the_task_back() {
+        let (mut mac, area) = board_with_area("mac");
+        let id = mac.add_task(area, "task", None, None);
+        let (mut linux, _) = board_with_area("linux");
+        sync(&mac, &mut linux);
+        mac.delete_task(id);
+        linux.update_task(id, |t| t.title = "edited later".into());
+        sync(&linux, &mut mac);
+        assert!(!mac.tasks[&id].meta.deleted);
+        assert_eq!(titles(&mac, area), ["edited later"]);
+    }
+
+    #[test]
+    fn a_delete_after_an_edit_wins() {
+        let (mut mac, area) = board_with_area("mac");
+        let id = mac.add_task(area, "task", None, None);
+        let (mut linux, _) = board_with_area("linux");
+        sync(&mac, &mut linux);
+        linux.update_task(id, |t| t.title = "edited".into());
+        mac.delete_task(id);
+        sync(&mac, &mut linux);
+        assert!(linux.tasks[&id].meta.deleted);
+    }
+
+    #[test]
+    fn older_records_do_not_overwrite_newer_ones() {
+        let (mut mac, area) = board_with_area("mac");
+        let id = mac.add_task(area, "task", None, None);
+        let old = mac.clone();
+        mac.update_task(id, |t| t.title = "new".into());
+        assert!(!sync(&old, &mut mac));
+        assert_eq!(mac.tasks[&id].title, "new");
+    }
+
+    #[test]
+    fn three_devices_end_up_the_same_in_any_order() {
+        let mut devices: Vec<Board> = ["a", "b", "c"]
+            .into_iter()
+            .map(|d| board_with_area(d).0)
+            .collect();
+        let area = devices[0].areas_sorted()[0].meta.id;
+        for (i, b) in devices.iter_mut().enumerate() {
+            b.add_task(area, &format!("from {i}"), None, None);
+            b.add_group(area, &format!("group {i}"), GROUP_COLORS[i]);
+        }
+        let shared = devices[0].add_task(area, "shared", None, None);
+        let copy = devices[0].clone();
+        sync(&copy, &mut devices[1]);
+        sync(&copy, &mut devices[2]);
+        devices[1].update_task(shared, |t| t.title = "b edits".into());
+        devices[2].update_task(shared, |t| t.title = "c edits last".into());
+
+        let snapshots: Vec<Board> = devices.clone();
+        for (i, b) in devices.iter_mut().enumerate() {
+            // Each device reads the others in a different order.
+            for j in [2, 0, 1].iter().map(|k| (k + i) % 3) {
+                sync(&snapshots[j], b);
+            }
+        }
+        for b in &devices[1..] {
+            assert_eq!(b.tasks, devices[0].tasks);
+            assert_eq!(b.groups, devices[0].groups);
+            assert_eq!(b.areas, devices[0].areas);
+        }
+        assert_eq!(devices[0].tasks[&shared].title, "c edits last");
+        assert_eq!(devices[0].priority_list(area).len(), 4);
+        assert_eq!(devices[0].groups_of(area).len(), 3);
+    }
+
+    #[test]
+    fn a_rename_beats_the_default_area_names() {
+        let (mut mac, work) = board_with_area("mac");
+        mac.rename_area(work, "Job");
+        let (mut linux, _) = board_with_area("linux");
+        sync(&mac, &mut linux);
+        assert_eq!(linux.areas[&work].name, "Job");
+        // A fresh device starting later doesn't undo it.
+        let (fresh, _) = board_with_area("new");
+        sync(&fresh, &mut linux);
+        assert_eq!(linux.areas[&work].name, "Job");
+    }
+
+    #[test]
+    fn undo_brings_back_a_deleted_task_and_group() {
+        let (mut b, area) = board_with_area("mac");
+        let group = b.add_group(area, "g", GROUP_COLORS[0]);
+        let id = b.add_task(area, "task", Some(group), None);
+        let snapshot = b.clone();
+        b.delete_group(group);
+        b.delete_task(id);
+        b.restore(&snapshot);
+        assert!(b.group(group).is_some());
+        assert_eq!(titles(&b, area), ["task"]);
+        // Restoring twice is harmless (it only records the restore again).
+        b.restore(&snapshot);
+        assert!(b.group(group).is_some());
+        assert_eq!(titles(&b, area), ["task"]);
+    }
+
+    #[test]
+    fn task_details_round_trip_through_the_editor() {
+        let (mut b, area) = board_with_area("mac");
+        let id = b.add_task(area, "task", None, Some(date(2026, 12, 1)));
+        b.update_task(id, |t| {
+            t.notes = "n".into();
+            t.lead_days = Some(3);
+            t.color = Some([1, 2, 3]);
+        });
+        let details = TaskDetails::from(&b.tasks[&id]);
+        assert_eq!(details.title, "task");
+        assert_eq!(details.notes, "n");
+        assert_eq!(details.deadline, Some(date(2026, 12, 1)));
+        assert_eq!(details.lead_days, Some(3));
+        assert_eq!(details.color, Some([1, 2, 3]));
+        let before = b.tasks[&id].clone();
+        b.update_details(id, details);
+        let mut after = b.tasks[&id].clone();
+        after.meta = before.meta.clone();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn undo_only_restamps_records_that_really_change() {
+        let mut b = Board::new("mac");
+        b.today = TODAY;
+        b.add_default_areas();
+        let area = b.areas_sorted()[0].meta.id;
+        let kept = b.add_task(area, "kept", None, None);
+        let changed = b.add_task(area, "changed", None, None);
+        let snapshot = b.clone();
+        b.update_task(changed, |t| t.title = "renamed".into());
+        let kept_stamp = b.tasks[&kept].meta.clone();
+
+        b.restore(&snapshot);
+        assert_eq!(b.tasks[&changed].title, "changed");
+        assert_eq!(
+            b.tasks[&kept].meta, kept_stamp,
+            "unchanged: not synced again"
+        );
+        // Restoring the same state again changes nothing at all.
+        let after = b.clone();
+        b.restore(&snapshot);
+        assert_eq!(b, after);
     }
 }

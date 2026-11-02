@@ -2971,6 +2971,9 @@ fn subtask_toggle(ui: &mut egui::Ui, subtasks: &[Subtask], expanded: bool) -> bo
     );
     ui.painter().galley(text_pos, galley, text_color);
 
+    // Named for screen readers (and tests), e.g. "Subtasks 1/3".
+    let label = format!("Subtasks {done}/{}", subtasks.len());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(if expanded {
@@ -3459,12 +3462,17 @@ impl PriogatorApp {
 }
 
 #[cfg(test)]
+mod ui_tests_app;
+#[cfg(test)]
+mod ui_tests_tasks;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use egui_kittest::kittest::Queryable as _;
 
     /// Settings for a temporary folder holding the example data.
-    fn demo_config(dir: &std::path::Path) -> Config {
+    pub(super) fn demo_config(dir: &std::path::Path) -> Config {
         let config = Config {
             device: "preview".into(),
             sync_dir: dir.join("sync"),
@@ -3486,7 +3494,10 @@ mod tests {
     }
 
     /// The real app in a 1280×800 test window.
-    fn harness(config: Config, theme: egui::Theme) -> egui_kittest::Harness<'static, PriogatorApp> {
+    pub(super) fn harness(
+        config: Config,
+        theme: egui::Theme,
+    ) -> egui_kittest::Harness<'static, PriogatorApp> {
         egui_kittest::Harness::builder()
             .with_size([1280.0, 800.0])
             .with_pixels_per_point(2.0)
@@ -3495,14 +3506,17 @@ mod tests {
             .build_eframe(|cc| PriogatorApp::new(&cc.egui_ctx, config))
     }
 
-    fn click_at(harness: &mut egui_kittest::Harness<'_, PriogatorApp>, pos: egui::Pos2) {
+    pub(super) fn click_at(harness: &mut egui_kittest::Harness<'_, PriogatorApp>, pos: egui::Pos2) {
         harness.hover_at(pos);
         harness.drag_at(pos);
         harness.drop_at(pos);
         harness.run_steps(2);
     }
 
-    fn right_click_at(harness: &mut egui_kittest::Harness<'_, PriogatorApp>, pos: egui::Pos2) {
+    pub(super) fn right_click_at(
+        harness: &mut egui_kittest::Harness<'_, PriogatorApp>,
+        pos: egui::Pos2,
+    ) {
         harness.hover_at(pos);
         for pressed in [true, false] {
             harness.event(egui::Event::PointerButton {
@@ -3516,7 +3530,7 @@ mod tests {
     }
 
     /// Press at `from`, move to `to` in a few steps, release there.
-    fn drag(
+    pub(super) fn drag(
         harness: &mut egui_kittest::Harness<'_, PriogatorApp>,
         from: egui::Pos2,
         to: egui::Pos2,

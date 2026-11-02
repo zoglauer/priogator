@@ -438,4 +438,275 @@ mod tests {
         );
         assert_eq!(rebase(Path::new("/elsewhere"), &old, &new), None);
     }
+
+    #[test]
+    fn settings_from_an_older_version_get_defaults() {
+        let config: Config =
+            serde_json::from_str(r#"{"device":"mac","sync_dir":"/tmp/sync"}"#).unwrap();
+        assert_eq!(config.device, "mac");
+        assert_eq!(
+            config.deadline_horizon_days,
+            crate::board::DEFAULT_HORIZON_DAYS
+        );
+        assert_eq!(config.done_days, crate::board::DEFAULT_DONE_DAYS);
+        assert_eq!(config.column_width, crate::app::DEFAULT_COLUMN_WIDTH);
+        assert!(config.folded_areas.is_empty());
+        assert_eq!(config.color_scheme, ColorScheme::Standard);
+        assert_eq!(config.due_soon_color, None);
+        assert_eq!(config.file, None, "never saved unless loaded from a file");
+        assert!(config.backup_dir.ends_with("backups"));
+    }
+
+    #[test]
+    fn colors_are_saved_readably() {
+        let mut config: Config =
+            serde_json::from_str(r#"{"device":"mac","sync_dir":"/tmp/sync"}"#).unwrap();
+        config.color_scheme = ColorScheme::Rainbow;
+        config.due_soon_color = Some([10, 20, 30]);
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""color_scheme":"rainbow""#), "{json}");
+        assert!(json.contains(r#""due_soon_color":[10,20,30]"#), "{json}");
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.color_scheme, ColorScheme::Rainbow);
+        assert_eq!(back.due_soon_color, Some([10, 20, 30]));
+        assert!(serde_json::from_str::<ColorScheme>(r#""plaid""#).is_err());
+    }
+
+    #[test]
+    fn color_scheme_names() {
+        assert_eq!(
+            ColorScheme::ALL.map(ColorScheme::name),
+            ["Standard", "Rainbow"]
+        );
+    }
+
+    #[test]
+    fn a_file_from_a_newer_version_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("device-future.json");
+        let mut board = Board::new("future");
+        board.add_default_areas();
+        write_board_file(&path, &board).unwrap();
+        let text = fs::read_to_string(&path).unwrap().replacen(
+            &format!("\"format\": {FORMAT_VERSION}"),
+            "\"format\": 99",
+            1,
+        );
+        fs::write(&path, text).unwrap();
+
+        let error = read_board_file(&path, "mac").unwrap_err().to_string();
+        assert!(error.contains("newer Priogator"), "{error}");
+        let mut folder = SyncFolder::new(dir.path(), "mac");
+        let (_, errors) = folder.load();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("device-future.json"), "{errors:?}");
+    }
+
+    #[test]
+    fn the_own_file_is_named_after_the_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut folder = SyncFolder::new(dir.path(), "macbook-3f2a");
+        let (board, _) = folder.load();
+        folder.save(&board).unwrap();
+        let names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["device-macbook-3f2a.json"], "no temp file left");
+    }
+
+    #[test]
+    fn writing_replaces_the_whole_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/folder/file.json");
+        write_atomic(&path, b"a long first version").unwrap();
+        write_atomic(&path, b"short").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"short");
+        assert!(!dir.path().join("nested/folder/.file.json.tmp").exists());
+    }
+
+    #[test]
+    fn saving_our_own_file_is_not_a_change_from_elsewhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut folder = SyncFolder::new(dir.path(), "mac");
+        let (mut board, _) = folder.load();
+        let area = board.areas_sorted()[0].meta.id;
+        board.add_task(area, "mine", None, None);
+        folder.save(&board).unwrap();
+        let (changed, errors) = folder.reload_if_changed(&mut board);
+        assert!(!changed && errors.is_empty());
+    }
+
+    #[test]
+    fn an_empty_or_missing_folder_starts_with_the_default_areas() {
+        let dir = tempfile::tempdir().unwrap();
+        for path in [dir.path().to_path_buf(), dir.path().join("not/there")] {
+            let mut folder = SyncFolder::new(&path, "mac");
+            let (board, errors) = folder.load();
+            assert!(errors.is_empty());
+            let names: Vec<&str> = board
+                .areas_sorted()
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect();
+            assert_eq!(names, ["Work", "Private ventures", "House", "Family"]);
+            assert!(board.tasks.is_empty());
+        }
+    }
+
+    #[test]
+    fn saving_creates_a_missing_sync_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync = dir.path().join("new/sync");
+        let mut folder = SyncFolder::new(&sync, "mac");
+        let (board, _) = folder.load();
+        folder.save(&board).unwrap();
+        assert!(sync.join("device-mac.json").exists());
+    }
+
+    #[test]
+    fn the_newest_edit_wins_whatever_the_file_order() {
+        let dir = tempfile::tempdir().unwrap();
+        // "zz" sorts after "aa" but has the older change.
+        let mut newer = SyncFolder::new(dir.path(), "aa");
+        let (mut aa, _) = newer.load();
+        let area = aa.areas_sorted()[0].meta.id;
+        let id = aa.add_task(area, "first", None, None);
+        let mut zz = aa.clone();
+        zz.device = "zz".into();
+        zz.update_task(id, |t| t.title = "older".into());
+        aa.update_task(id, |t| t.title = "newer".into());
+        // Both edits can fall in the same clock tick; make the order explicit.
+        let stamp = zz.tasks[&id].meta.updated_at;
+        aa.tasks.get_mut(&id).unwrap().meta.updated_at =
+            stamp + jiff::SignedDuration::from_secs(1);
+        newer.save(&aa).unwrap();
+        SyncFolder::new(dir.path(), "zz").save(&zz).unwrap();
+
+        let (third, _) = SyncFolder::new(dir.path(), "third").load();
+        assert_eq!(third.tasks[&id].title, "newer");
+    }
+
+    #[test]
+    fn a_deletion_on_another_device_arrives() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mac_folder = SyncFolder::new(dir.path(), "mac");
+        let (mut mac, _) = mac_folder.load();
+        let area = mac.areas_sorted()[0].meta.id;
+        let id = mac.add_task(area, "shared", None, None);
+        mac_folder.save(&mac).unwrap();
+
+        let mut linux_folder = SyncFolder::new(dir.path(), "linux");
+        let (mut linux, _) = linux_folder.load();
+        linux.delete_task(id);
+        linux_folder.save(&linux).unwrap();
+
+        let (changed, _) = mac_folder.reload_if_changed(&mut mac);
+        assert!(changed);
+        assert!(mac.priority_list(area).is_empty());
+    }
+
+    #[test]
+    fn one_broken_file_does_not_stop_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut linux_folder = SyncFolder::new(dir.path(), "linux");
+        let (mut linux, _) = linux_folder.load();
+        let area = linux.areas_sorted()[0].meta.id;
+        linux.add_task(area, "from linux", None, None);
+        linux_folder.save(&linux).unwrap();
+        fs::write(dir.path().join("device-broken.json"), "{ half a file").unwrap();
+
+        let (mac, errors) = SyncFolder::new(dir.path(), "mac").load();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(mac.priority_list(area).len(), 1);
+    }
+
+    #[test]
+    fn files_that_are_not_device_files_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "notes.json",
+            "backup-2026-10-29.json",
+            "device-x.json.bak",
+            "README",
+        ] {
+            fs::write(dir.path().join(name), "junk").unwrap();
+        }
+        let (_, errors) = SyncFolder::new(dir.path(), "mac").load();
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn reading_a_missing_board_file_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_board_file(&dir.path().join("nope.json"), "mac").is_err());
+    }
+
+    #[test]
+    fn a_board_file_keeps_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut board = Board::new("mac");
+        board.add_default_areas();
+        let area = board.areas_sorted()[0].meta.id;
+        let group = board.add_group(area, "Clients", [1, 2, 3]);
+        let task = board.add_task(area, "task", Some(group), None);
+        board.add_subtask(task, "step");
+        board.set_area_color(area, Some([9, 9, 9]));
+        let path = dir.path().join("file.json");
+        write_board_file(&path, &board).unwrap();
+        let back = read_board_file(&path, "mac").unwrap();
+        assert_eq!(back.areas, board.areas);
+        assert_eq!(back.groups, board.groups);
+        assert_eq!(back.tasks, board.tasks);
+    }
+
+    #[test]
+    fn moving_a_missing_old_folder_does_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let new = home.path().join("Priogator");
+        move_folder(&home.path().join("Prioritizer"), &new).unwrap();
+        assert!(!new.exists());
+    }
+
+    #[test]
+    fn a_fully_moved_old_folder_is_removed() {
+        let home = tempfile::tempdir().unwrap();
+        let old = home.path().join("Prioritizer");
+        let new = home.path().join("Priogator");
+        fs::create_dir_all(old.join("backups/deep")).unwrap();
+        fs::write(old.join("backups/deep/b.json"), "b").unwrap();
+        fs::write(old.join("config.json"), "c").unwrap();
+        move_folder(&old, &new).unwrap();
+        assert!(!old.exists(), "empty afterwards, so removed");
+        assert_eq!(
+            fs::read_to_string(new.join("backups/deep/b.json")).unwrap(),
+            "b"
+        );
+        assert_eq!(fs::read_to_string(new.join("config.json")).unwrap(), "c");
+    }
+
+    #[test]
+    fn paths_inside_the_old_folder_are_rebased() {
+        let old = Path::new("/home/a/Prioritizer");
+        let new = Path::new("/home/a/Priogator");
+        assert_eq!(rebase(old, old, new), Some(new.to_path_buf()));
+        assert_eq!(
+            rebase(&old.join("sync/sub"), old, new),
+            Some(new.join("sync/sub"))
+        );
+        // A sibling whose name only starts the same isn't inside it.
+        assert_eq!(rebase(Path::new("/home/a/Prioritizer2/x"), old, new), None);
+    }
+
+    #[test]
+    fn device_names_are_safe_file_names() {
+        let name = default_device_name();
+        assert!(!name.is_empty());
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+            "{name}"
+        );
+        assert_ne!(name, default_device_name(), "a random suffix each time");
+    }
 }

@@ -298,4 +298,149 @@ mod tests {
             assert_eq!(titles, ["kept"]);
         }
     }
+
+    fn board() -> Board {
+        let mut board = Board::new("mac");
+        board.add_default_areas();
+        board
+    }
+
+    #[test]
+    fn several_backups_a_day_are_listed_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let backups = Backups::new(dir.path());
+        let b = board();
+        for name in [
+            "backup-2026-10-28-090000.json",
+            "backup-2026-10-29-080000.json",
+            "backup-2026-10-29-173000.json",
+            "backup-2026-10-29-120000.json",
+        ] {
+            write_board_file(&dir.path().join(name), &b).unwrap();
+        }
+        let list: Vec<(Date, String)> = backups
+            .list()
+            .into_iter()
+            .map(|f| (f.date, f.time))
+            .collect();
+        assert_eq!(
+            list,
+            [
+                (date(2026, 10, 29), "17:30:00".to_owned()),
+                (date(2026, 10, 29), "12:00:00".to_owned()),
+                (date(2026, 10, 29), "08:00:00".to_owned()),
+                (date(2026, 10, 28), "09:00:00".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn other_files_and_a_missing_folder_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("notes.txt"), "x").unwrap();
+        fs::write(dir.path().join("device-mac.json"), "{}").unwrap();
+        fs::write(dir.path().join("backup-yesterday.json"), "{}").unwrap();
+        assert!(Backups::new(dir.path()).list().is_empty());
+        assert!(Backups::new(&dir.path().join("missing")).list().is_empty());
+    }
+
+    #[test]
+    fn everything_from_the_last_week_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let backups = Backups::new(dir.path());
+        let b = board();
+        let today = date(2026, 10, 29);
+        // Three a day for a week.
+        for day in 0..7 {
+            let d = today.saturating_sub(Span::new().days(day));
+            for time in ["080000", "120000", "200000"] {
+                write_board_file(&dir.path().join(format!("backup-{d}-{time}.json")), &b).unwrap();
+            }
+        }
+        backups.prune(today).unwrap();
+        assert_eq!(backups.list().len(), 21);
+    }
+
+    #[test]
+    fn within_a_week_the_oldest_backup_is_kept() {
+        let today = date(2026, 10, 29);
+        // Three weeks ago: Monday, Wednesday, Friday of one ISO week.
+        let dates = [date(2026, 10, 5), date(2026, 10, 7), date(2026, 10, 9)];
+        assert_eq!(to_keep(&dates, today), [true, false, false]);
+        // The day a week ago is the first one thinned out.
+        let week_ago = today.saturating_sub(Span::new().days(7));
+        let six_days = today.saturating_sub(Span::new().days(6));
+        assert_eq!(to_keep(&[week_ago, six_days], today), [true, true]);
+    }
+
+    #[test]
+    fn an_old_style_backup_from_today_counts_as_todays() {
+        let dir = tempfile::tempdir().unwrap();
+        let backups = Backups::new(dir.path());
+        let today = date(2026, 10, 29);
+        write_board_file(&dir.path().join("backup-2026-10-29.json"), &board()).unwrap();
+        assert!(!backups.daily(&board(), today).unwrap());
+        assert_eq!(backups.list().len(), 1);
+    }
+
+    #[test]
+    fn daily_creates_the_backup_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a/b/backups");
+        let backups = Backups::new(&nested);
+        assert!(backups.daily(&board(), date(2026, 10, 29)).unwrap());
+        assert_eq!(backups.list().len(), 1);
+        assert_eq!(backups.dir(), nested);
+    }
+
+    #[test]
+    fn a_manual_backup_is_named_with_the_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let backups = Backups::new(dir.path());
+        let path = backups.now(&board()).unwrap();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let (day, time) = parse_name(&name).expect("a backup name");
+        assert_eq!(day, jiff::Zoned::now().date());
+        assert!(time.is_some());
+    }
+
+    #[test]
+    fn deleting_a_missing_backup_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let backups = Backups::new(dir.path());
+        assert!(
+            backups
+                .delete(&dir.path().join("backup-2026-10-29.json"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn restoring_removes_areas_added_since() {
+        let dir = tempfile::tempdir().unwrap();
+        let backups = Backups::new(dir.path());
+        let mut b = board();
+        let path = backups.now(&b).unwrap();
+        let new_area = b.add_area("Hobbies");
+        b.add_task(new_area, "paint", None, None);
+        let snapshot = crate::storage::read_board_file(&path, "mac").unwrap();
+        b.restore(&snapshot);
+        let names: Vec<&str> = b.areas_sorted().iter().map(|a| a.name.as_str()).collect();
+        assert!(!names.contains(&"Hobbies"), "{names:?}");
+        assert_eq!(names.len(), 4);
+        assert!(b.tasks.values().all(|t| t.meta.deleted));
+    }
+
+    #[test]
+    fn backups_contain_deleted_records_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let backups = Backups::new(dir.path());
+        let mut b = board();
+        let area = b.areas_sorted()[0].meta.id;
+        let gone = b.add_task(area, "gone", None, None);
+        b.delete_task(gone);
+        let path = backups.now(&b).unwrap();
+        let back = crate::storage::read_board_file(&path, "mac").unwrap();
+        assert!(back.tasks[&gone].meta.deleted);
+    }
 }

@@ -137,6 +137,28 @@ After a change the owner will look at, rebuild and reinstall the app:
   exactly that rather than an alternative of your own; render previews and
   look at them before reporting.
 
+## Tests
+
+~280 tests, all run by `cargo test` in a few seconds (plus the two preview
+renderers, `--ignored`). Every feature gets a test; add one with each change.
+
+- Data: `mod tests` in each module (board, storage, backup, model, repeat,
+  active, demo, licenses).
+- UI, the real app driven like a user: `src/app/ui_tests_tasks.rs` (task
+  dialog, cards, menus, keyboard, drag & drop, undo, stats) and
+  `src/app/ui_tests_app.rs` (areas, groups, settings, backups, About, menu,
+  sync). Shared helpers (`harness`, `demo_config`, `click_at`,
+  `right_click_at`, `drag`) live in `app::tests`.
+- Drive the action under test through the UI; setting state directly is
+  only for setup. Assert on `harness.state()` and on what is shown.
+- Hand-drawn widgets need `widget_info` labels to be findable (e.g. the
+  subtask counter is "Subtasks 1/3", colour dots "Red", "Purple"…).
+- Kittest steps advance 0.25 s: double-clicks need a widened delay (see the
+  helper in ui_tests_tasks), and dialogs re-centre for a few frames after
+  their content changes — let them settle before clicking.
+- Never rely on two `Timestamp::now()` calls differing (same tick → tie →
+  device name decides); set `updated_at` explicitly when order matters.
+
 ## egui 0.37 / kittest gotchas
 
 - `App::ui(&mut self, ui, frame)` (not `update`); `egui::Panel`, `Modal`,

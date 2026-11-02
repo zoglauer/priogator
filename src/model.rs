@@ -162,3 +162,128 @@ impl Versioned for TaskItem {
         &mut self.meta
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const META: &str = r#"{"id":"00000000-0000-0000-0000-000000000001","updated_at":"2026-01-01T00:00:00Z","device":"mac"}"#;
+
+    #[test]
+    fn a_task_from_an_old_version_loads_with_defaults() {
+        // Only the fields the first version wrote.
+        let json = format!(
+            r#"{{"meta":{META},"area":"00000000-0000-0000-0000-0000000000aa","group":null,
+            "title":"old","deadline":null,"rank":2.0,"done":false,
+            "created_at":"2026-01-01T00:00:00Z","completed_at":null}}"#
+        );
+        let task: TaskItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(task.title, "old");
+        assert!(!task.meta.deleted);
+        assert!(task.notes.is_empty());
+        assert!(!task.pinned);
+        assert!(task.subtasks.is_empty());
+        assert_eq!(task.top_rank, None);
+        assert_eq!(task.lead_days, None);
+        assert_eq!(task.repeat, None);
+        assert_eq!(task.color, None);
+    }
+
+    #[test]
+    fn an_area_from_an_old_version_loads_with_defaults() {
+        let json = format!(r#"{{"meta":{META},"name":"Work","order":0.0}}"#);
+        let area: Area = serde_json::from_str(&json).unwrap();
+        assert_eq!(area.name, "Work");
+        assert_eq!(area.active, None);
+        assert_eq!(area.color, None);
+    }
+
+    #[test]
+    fn every_field_of_a_task_survives_a_round_trip() {
+        let task = TaskItem {
+            meta: Meta {
+                deleted: true,
+                ..Meta::new("mac")
+            },
+            area: Uuid::new_v4(),
+            group: Some(Uuid::new_v4()),
+            title: "Ümlauts & \"quotes\" ✓".into(),
+            notes: "line 1\nline 2".into(),
+            deadline: Some(jiff::civil::date(2026, 12, 24)),
+            rank: -3.5,
+            pinned: true,
+            subtasks: vec![Subtask::new("one"), Subtask::new("two")],
+            top_rank: Some(1.0),
+            lead_days: Some(0),
+            repeat: Some(crate::repeat::Repeat::AfterDone {
+                every: 2,
+                unit: crate::repeat::Unit::Months,
+            }),
+            color: Some([1, 2, 3]),
+            done: true,
+            created_at: Timestamp::now(),
+            completed_at: Some(Timestamp::now()),
+        };
+        let json = serde_json::to_string(&task).unwrap();
+        let back: TaskItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, task);
+    }
+
+    #[test]
+    fn every_field_of_an_area_and_group_survives_a_round_trip() {
+        let area = Area {
+            meta: Meta::new("linux"),
+            name: "House".into(),
+            order: 2.0,
+            active: Some(crate::active::ActiveHours::default()),
+            color: Some([200, 100, 0]),
+        };
+        let back: Area = serde_json::from_str(&serde_json::to_string(&area).unwrap()).unwrap();
+        assert_eq!(back, area);
+        let group = TaskGroup {
+            meta: Meta::new("linux"),
+            area: area.meta.id,
+            name: "Garden".into(),
+            color: [1, 2, 3],
+        };
+        let back: TaskGroup =
+            serde_json::from_str(&serde_json::to_string(&group).unwrap()).unwrap();
+        assert_eq!(back, group);
+    }
+
+    #[test]
+    fn touching_never_goes_back_in_time() {
+        let mut meta = Meta::new("mac");
+        // Last changed "in the future", e.g. on a computer whose clock was ahead.
+        let future = Timestamp::now() + SignedDuration::from_hours(1);
+        meta.updated_at = future;
+        meta.touch("linux");
+        assert!(meta.updated_at > future);
+        assert_eq!(meta.device, "linux");
+
+        let before = meta.updated_at;
+        meta.touch("linux");
+        assert!(meta.updated_at > before, "each touch is newer");
+    }
+
+    #[test]
+    fn equal_times_are_decided_by_device_name() {
+        let a = Meta::new("alpha");
+        let b = Meta {
+            device: "beta".into(),
+            ..a.clone()
+        };
+        assert!(b.is_newer_than(&a));
+        assert!(!a.is_newer_than(&b));
+        assert!(!a.is_newer_than(&a), "not newer than itself");
+    }
+
+    #[test]
+    fn subtask_titles_are_trimmed_and_ids_unique() {
+        let a = Subtask::new("  buy milk \n");
+        let b = Subtask::new("buy milk");
+        assert_eq!(a.title, "buy milk");
+        assert!(!a.done);
+        assert_ne!(a.id, b.id);
+    }
+}
