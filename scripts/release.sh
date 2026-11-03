@@ -43,6 +43,7 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 
 echo "== Testing"
+cargo fetch --locked --quiet  # all platforms' libraries (license test)
 cargo test --quiet
 cargo clippy --quiet --all-targets -- -D warnings
 scripts/check-test-parity.sh

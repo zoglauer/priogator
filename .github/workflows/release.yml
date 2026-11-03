@@ -25,6 +25,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # All platforms' libraries, not just the Mac's: the license test checks
+      # the Linux dependency graph too (offline, see src/licenses.rs).
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+
       - name: Test
         run: cargo test
 

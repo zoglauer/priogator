@@ -149,7 +149,7 @@ mod tests {
                 .expect("cargo tree");
             assert!(
                 output.status.success(),
-                "{}",
+                "{}\n(If libraries for other platforms are missing: run `cargo fetch`.)",
                 String::from_utf8_lossy(&output.stderr)
             );
             let shipped: std::collections::BTreeSet<String> =
