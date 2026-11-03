@@ -396,6 +396,7 @@ fn the_group_can_be_changed_in_the_dialog() {
 fn a_deadline_moves_the_task_on_top_and_removing_it_moves_it_back() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = app(&dir);
+    trash_out_of_the_way(&mut h);
     let work = area(&h, 0);
     open(&mut h, "Read team feedback");
     deadline_checkbox(&h).click();
@@ -631,10 +632,22 @@ fn subtasks_unfold_on_the_card_and_can_be_ticked_there() {
     assert!(h.query_by_label("Check the weather").is_none());
 }
 
+/// The demo's trash is due next Friday, so depending on the weekday its
+/// date reads "today", "tomorrow", "in 3 d"… like the dates under test.
+fn trash_out_of_the_way(h: &mut H) {
+    let trash = id_of(h, "Take out the trash");
+    let day = today().saturating_add(jiff::Span::new().days(10));
+    h.state_mut()
+        .board
+        .update_task(trash, |t| t.deadline = Some(day));
+    h.run_steps(2);
+}
+
 #[test]
 fn deadlines_read_as_days_from_today() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = app(&dir);
+    trash_out_of_the_way(&mut h);
     // Read team feedback: due tomorrow; Clean up shared drive: in 30 days.
     let in_days = |n: i64| today().saturating_add(jiff::Span::new().days(n));
     let read = id_of(&h, "Read team feedback");
