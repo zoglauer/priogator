@@ -11,6 +11,8 @@ mod model;
 mod repeat;
 mod storage;
 mod theme;
+#[cfg(target_os = "macos")]
+mod update;
 
 use eframe::egui;
 

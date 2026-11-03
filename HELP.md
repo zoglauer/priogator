@@ -263,7 +263,20 @@ which group is visible (**All ▾**, or e.g. **● Clients ▾**), and **+ New**
   without a group). ⌘Z undoes any of these.
 ---
 
-## Areas
+## Updates (macOS)
+
+Once a day Priogator asks GitHub whether there's a newer version. If there
+is, a blue **Update to 1.x.y** button appears in the toolbar. Click it to
+see what's new, then **Install and Restart** (or **Later**). Priogator
+downloads the new version, makes sure it's signed by its developer and
+checked by Apple, replaces itself and restarts. Your tasks and settings
+are not touched. Nothing is ever installed without your click.
+
+☰ → **Check for Updates…** checks right away. To stop the daily check,
+untick **Check for updates automatically** in Settings. If an update can't
+be installed (e.g. the app sits in a folder you can't write to), the dialog
+says why and links to the releases page.
+
 
 - **Add:** **+ Area** after the last area.
 - **New task in an area:** right-click an empty spot in it, or right-click
@@ -426,6 +439,7 @@ All settings are stored in `config.json`:
 | `done_days` | how long done tasks stay visible (also in Settings) |
 | `column_width` | width of each area in pixels (also in Settings) |
 | `color_scheme` | `standard` or `rainbow` (also in Settings) |
+| `check_updates` | look for a new version once a day (also in Settings) |
 | `due_soon_color` | colour of the Due soon section as `[r, g, b]`, or `null` for the default (also in Settings) |
 
 Quit Priogator before editing the file by hand, and start it again

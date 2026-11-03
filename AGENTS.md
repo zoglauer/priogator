@@ -199,6 +199,19 @@ The owner wants as few libraries in the app as possible. Count them with
   so. Check that Linux still compiles:
   `cargo check --target x86_64-unknown-linux-gnu`.
 
+## Updates (macOS only)
+
+`src/update.rs`: once a day (if `config.check_updates`) and via ☰ → Check
+for Updates…, `curl` fetches GitHub's latest release (no HTTP library, on
+purpose). A newer version shows an "Update to x.y.z" toolbar button; the
+dialog installs only on the user's click: download the DMG, verify (codesign
+intact, TeamIdentifier Z86A9UVWNP, spctl/notarized), replace the bundle
+(stage, swap, keep old until done), restart via a small shell waiting for
+our pid. Development/test builds (not in a .app) refuse to install. Tests
+never touch the network: `demo_config` has `check_updates: false` and UI
+tests inject `Updater::with_fetch`. `cargo test real_update -- --ignored`
+does the real download + install into a temp folder.
+
 ## Licenses (keep up to date)
 
 The About dialog shows the app's license and **every third-party library's

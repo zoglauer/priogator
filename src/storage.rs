@@ -44,6 +44,9 @@ pub struct Config {
     /// Colour of the "Due soon · pinned" section; `None`: the standard orange.
     #[serde(default)]
     pub due_soon_color: Option<[u8; 3]>,
+    /// Look for a new version once a day (macOS).
+    #[serde(default = "yes")]
+    pub check_updates: bool,
     /// The file it was loaded from and is saved to. `None` (e.g. in tests):
     /// never saved, so nothing can overwrite the real settings.
     #[serde(skip)]
@@ -70,6 +73,10 @@ impl ColorScheme {
             ColorScheme::Rainbow => "Rainbow",
         }
     }
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn default_done_days() -> i64 {
@@ -164,6 +171,7 @@ impl Config {
             folded_areas: Vec::new(),
             color_scheme: ColorScheme::default(),
             due_soon_color: None,
+            check_updates: true,
             file: Some(file),
         };
         config.save()?;
@@ -351,6 +359,7 @@ mod tests {
             folded_areas: Vec::new(),
             color_scheme: ColorScheme::default(),
             due_soon_color: None,
+            check_updates: true,
             file: None,
         };
         config.save().unwrap();

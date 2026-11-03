@@ -1484,3 +1484,126 @@ fn the_done_heading_names_the_time_window() {
     h.run_steps(4);
     assert!(h.query_by_label("DONE TODAY (1)").is_some());
 }
+
+// ----- Updates (macOS) ---------------------------------------------------
+
+/// GitHub's answer naming `tag` as the latest release.
+#[cfg(target_os = "macos")]
+fn release_answer(tag: &str) -> crate::update::Fetch {
+    let json = format!(
+        r#"{{"tag_name": "{tag}", "html_url": "https://example.com/{tag}",
+            "body": "Nicer colours.",
+            "assets": [{{"browser_download_url": "https://example.com/Priogator.dmg"}}]}}"#
+    );
+    std::sync::Arc::new(move || Ok(json.clone()))
+}
+
+/// Let the background check finish.
+#[cfg(target_os = "macos")]
+fn wait_for_update_check(h: &mut Harness) {
+    for _ in 0..300 {
+        h.run_steps(1);
+        if h.state().updater.state() != crate::update::State::Checking {
+            h.run_steps(4);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("the update check didn't finish");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn checking_for_updates_says_when_this_is_the_latest_version() {
+    let (_dir, mut h) = app();
+    let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+    h.state_mut().updater = crate::update::Updater::with_fetch(release_answer(&current));
+    menu(&mut h, "Check for Updates…");
+    wait_for_update_check(&mut h);
+    assert!(h.query_by_label_contains("is the latest version").is_some());
+    assert!(h.query_by_label_contains("Update to").is_none());
+    button(&h, "OK").click();
+    h.run_steps(4);
+    assert!(h.query_by_label("Updates").is_none(), "dialog closed");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_newer_version_is_offered_in_the_toolbar_until_installed() {
+    let (_dir, mut h) = app();
+    h.state_mut().updater = crate::update::Updater::with_fetch(release_answer("v99.0.0"));
+    menu(&mut h, "Check for Updates…");
+    wait_for_update_check(&mut h);
+    assert!(
+        h.query_by_label_contains("Priogator 99.0.0 is available")
+            .is_some()
+    );
+    assert!(
+        h.query_by_label("Nicer colours.").is_some(),
+        "release notes shown"
+    );
+    button(&h, "Later").click();
+    h.run_steps(4);
+    // Still offered, and the toolbar button opens the dialog again.
+    button(&h, "Update to 99.0.0").click();
+    h.run_steps(4);
+    assert!(h.query_by_label("Install and Restart").is_some());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_test_or_development_build_never_replaces_itself() {
+    let (_dir, mut h) = app();
+    h.state_mut().updater = crate::update::Updater::with_fetch(release_answer("v99.0.0"));
+    menu(&mut h, "Check for Updates…");
+    wait_for_update_check(&mut h);
+    button(&h, "Install and Restart").click();
+    h.run_steps(4);
+    assert!(h.query_by_label("Couldn't update.").is_some());
+    assert!(
+        h.query_by_label_contains("isn't an installed Priogator app")
+            .is_some()
+    );
+    assert!(matches!(
+        h.state().updater.state(),
+        crate::update::State::Failed(_)
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_failed_check_explains_itself() {
+    let (_dir, mut h) = app();
+    h.state_mut().updater = crate::update::Updater::with_fetch(std::sync::Arc::new(|| {
+        Err("Couldn't reach GitHub.".into())
+    }));
+    menu(&mut h, "Check for Updates…");
+    wait_for_update_check(&mut h);
+    assert!(h.query_by_label("Couldn't update.").is_some());
+    assert!(h.query_by_label("Couldn't reach GitHub.").is_some());
+    assert!(h.query_by_label_contains("releases page").is_some());
+    button(&h, "OK").click();
+    h.run_steps(4);
+    assert_eq!(h.state().updater.state(), crate::update::State::Idle);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_automatic_check_follows_the_setting() {
+    let (_dir, mut h) = app();
+    h.state_mut().updater = crate::update::Updater::with_fetch(release_answer("v99.0.0"));
+    // Off (as in all tests): nothing is checked.
+    h.run_steps(4);
+    assert_eq!(h.state().updater.state(), crate::update::State::Idle);
+    menu(&mut h, "Settings…");
+    h.get_by_label("Check for updates automatically (once a day)")
+        .click();
+    h.run_steps(2);
+    assert!(h.state().config.check_updates);
+    button(&h, "Done").click();
+    wait_for_update_check(&mut h);
+    assert!(
+        h.query_by_label("Update to 99.0.0").is_some(),
+        "found by itself"
+    );
+}

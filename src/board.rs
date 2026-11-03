@@ -1981,6 +1981,12 @@ mod tests {
         assert_eq!(linux.tasks[&id].title, "mac");
     }
 
+    /// Make `board`'s change to task `id` a second newer than `other`'s.
+    fn later_than(board: &mut Board, other: &Board, id: Uuid) {
+        let stamp = other.tasks[&id].meta.updated_at + jiff::SignedDuration::from_secs(1);
+        board.tasks.get_mut(&id).unwrap().meta.updated_at = stamp;
+    }
+
     #[test]
     fn an_edit_after_a_delete_brings_the_task_back() {
         let (mut mac, area) = board_with_area("mac");
@@ -1989,6 +1995,8 @@ mod tests {
         sync(&mac, &mut linux);
         mac.delete_task(id);
         linux.update_task(id, |t| t.title = "edited later".into());
+        // Both can fall in the same clock tick; make the order explicit.
+        later_than(&mut linux, &mac, id);
         sync(&linux, &mut mac);
         assert!(!mac.tasks[&id].meta.deleted);
         assert_eq!(titles(&mac, area), ["edited later"]);
@@ -2002,6 +2010,7 @@ mod tests {
         sync(&mac, &mut linux);
         linux.update_task(id, |t| t.title = "edited".into());
         mac.delete_task(id);
+        later_than(&mut mac, &linux, id);
         sync(&mac, &mut linux);
         assert!(linux.tasks[&id].meta.deleted);
     }
@@ -2033,6 +2042,8 @@ mod tests {
         sync(&copy, &mut devices[2]);
         devices[1].update_task(shared, |t| t.title = "b edits".into());
         devices[2].update_task(shared, |t| t.title = "c edits last".into());
+        let b_edit = devices[1].clone();
+        later_than(&mut devices[2], &b_edit, shared);
 
         let snapshots: Vec<Board> = devices.clone();
         for (i, b) in devices.iter_mut().enumerate() {

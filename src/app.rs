@@ -186,6 +186,10 @@ pub struct PriogatorApp {
     about_page: AboutPage,
     settings_open: bool,
     shortcuts_open: bool,
+    #[cfg(target_os = "macos")]
+    updater: crate::update::Updater,
+    #[cfg(target_os = "macos")]
+    update_dialog: bool,
 }
 
 /// Back on the left, Close on the right.
@@ -437,6 +441,10 @@ impl PriogatorApp {
             about_page: AboutPage::Main,
             settings_open: false,
             shortcuts_open: false,
+            #[cfg(target_os = "macos")]
+            updater: crate::update::Updater::new(),
+            #[cfg(target_os = "macos")]
+            update_dialog: false,
             undo: Vec::new(),
             redo: Vec::new(),
             history_request: None,
@@ -794,6 +802,22 @@ impl PriogatorApp {
                 let undo = ui
                     .add_enabled(!self.undo.is_empty(), egui::Button::new("↶"))
                     .on_hover_text("Undo (⌘Z)");
+                #[cfg(target_os = "macos")]
+                if let crate::update::State::Available(release) = self.updater.state() {
+                    ui.add_space(8.0);
+                    let button = egui::Button::new(
+                        RichText::new(format!("Update to {}", release.version))
+                            .color(Color32::WHITE),
+                    )
+                    .fill(ui.visuals().selection.bg_fill);
+                    if ui
+                        .add(button)
+                        .on_hover_text("A new version of Priogator is available")
+                        .clicked()
+                    {
+                        self.update_dialog = true;
+                    }
+                }
                 if undo.clicked() {
                     self.history_request = Some(History::Undo);
                 } else if redo.clicked() {
@@ -900,6 +924,11 @@ impl PriogatorApp {
                 self.backups_dialog = Some(self.load_backups_dialog());
             }
             ui.separator();
+            #[cfg(target_os = "macos")]
+            if ui.button("Check for Updates…").clicked() {
+                self.updater.check(ui.ctx());
+                self.update_dialog = true;
+            }
             if ui.button("Keyboard shortcuts").clicked() {
                 self.shortcuts_open = true;
             }
@@ -2457,6 +2486,21 @@ impl PriogatorApp {
             );
 
             ui.add_space(12.0);
+            #[cfg(target_os = "macos")]
+            {
+                ui.label(RichText::new("Updates").strong());
+                changed |= ui
+                    .checkbox(
+                        &mut config.check_updates,
+                        "Check for updates automatically (once a day)",
+                    )
+                    .on_hover_text(
+                        "Asks GitHub for the latest version. Nothing is installed \
+                         without asking you.",
+                    )
+                    .changed();
+                ui.add_space(12.0);
+            }
             ui.label(RichText::new("Backups").strong());
             let count = self.backups.list().len();
             ui.label(format!(
@@ -2516,6 +2560,122 @@ impl PriogatorApp {
             self.backups_dialog = Some(self.load_backups_dialog());
         } else if close || modal.should_close() {
             self.settings_open = false;
+        }
+    }
+
+    /// Updates: the daily check, the dialog, and the restart once a new
+    /// version is installed.
+    #[cfg(target_os = "macos")]
+    fn update(&mut self, ctx: &egui::Context) {
+        use crate::update::{RELEASES_PAGE, State};
+        if self.config.check_updates {
+            self.updater.check_daily(ctx);
+        }
+        let state = self.updater.state();
+        if let State::Installed(bundle) = &state {
+            // Quit (saving, see on_exit) and start the new version.
+            crate::update::relaunch_after_exit(bundle);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if !self.update_dialog {
+            return;
+        }
+        let current = env!("CARGO_PKG_VERSION");
+        let mut install = None;
+        let mut close = false;
+        let busy = matches!(state, State::Checking | State::Installing(_));
+        let modal = egui::Modal::new(egui::Id::unique("update")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.heading("Updates");
+            ui.add_space(8.0);
+            match &state {
+                State::Idle => close = true,
+                State::Checking => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Checking for updates…");
+                    });
+                }
+                State::UpToDate => {
+                    ui.label(format!("Priogator {current} is the latest version."));
+                }
+                State::Available(release) => {
+                    ui.label(format!(
+                        "Priogator {} is available. You have {current}.",
+                        release.version
+                    ));
+                    if !release.notes.is_empty() {
+                        ui.add_space(6.0);
+                        egui::ScrollArea::vertical()
+                            .max_height(160.0)
+                            .show(ui, |ui| ui.label(RichText::new(&release.notes).weak()));
+                    }
+                    ui.add_space(4.0);
+                    ui.hyperlink_to("Release page", &release.page_url);
+                }
+                State::Installing(release) => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(format!("Downloading and installing {}…", release.version));
+                    });
+                    ui.label(
+                        RichText::new("Priogator restarts by itself when it's done.")
+                            .small()
+                            .weak(),
+                    );
+                }
+                State::Installed(_) => {
+                    ui.label("Restarting…");
+                }
+                State::Failed(why) => {
+                    ui.label("Couldn't update.");
+                    ui.label(RichText::new(why).weak());
+                    ui.add_space(4.0);
+                    ui.hyperlink_to("Download it from the releases page", RELEASES_PAGE);
+                }
+            }
+            ui.add_space(10.0);
+            let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+            ui.allocate_ui_with_layout(
+                row,
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| match &state {
+                    State::Available(release) => {
+                        if ui.button("Install and Restart").clicked() {
+                            install = Some(release.clone());
+                        }
+                        if ui.button("Later").clicked() {
+                            close = true;
+                        }
+                    }
+                    State::Checking | State::Installing(_) | State::Installed(_) => {}
+                    _ => {
+                        if ui.button("OK").clicked() {
+                            close = true;
+                        }
+                    }
+                },
+            );
+        });
+        if let Some(release) = install {
+            let bundle = std::env::current_exe()
+                .ok()
+                .and_then(|exe| crate::update::bundle_of(&exe));
+            match bundle {
+                Some(bundle) => self.updater.install(ctx, release, bundle),
+                None => self.updater.fail(
+                    "This copy isn't an installed Priogator app (e.g. a development build), \
+                     so it can't replace itself.",
+                ),
+            }
+        }
+        if close || (modal.should_close() && !busy) {
+            self.update_dialog = false;
+            // A found update stays offered in the toolbar.
+            if !matches!(state, State::Available(_)) {
+                self.updater.dismiss();
+            }
         }
     }
 
@@ -3439,6 +3599,8 @@ impl eframe::App for PriogatorApp {
         self.backups_dialog(&ctx);
         self.about_dialog(&ctx);
         self.shortcuts_dialog(&ctx);
+        #[cfg(target_os = "macos")]
+        self.update(&ctx);
         open_links(&ctx);
 
         if self.board != before {
@@ -3493,6 +3655,8 @@ mod tests {
             folded_areas: Vec::new(),
             color_scheme: ColorScheme::Standard,
             due_soon_color: None,
+            // No network in tests; the update tests bring their own answer.
+            check_updates: false,
             // Not saved anywhere: tests must never touch the real settings.
             file: None,
         };
@@ -3953,6 +4117,31 @@ mod tests {
                 harness.run_steps(4);
                 let image = harness.render().expect("render");
                 image.save(format!("{prefix}-new-task.png")).expect("save");
+
+                // An update found: the toolbar button and the dialog.
+                #[cfg(target_os = "macos")]
+                {
+                    let json = r#"{"tag_name": "v1.1.0", "html_url": "https://example.com",
+                        "body": "Area colours and a new Done heading.",
+                        "assets": [{"browser_download_url": "https://example.com/P.dmg"}]}"#;
+                    let ctx = harness.ctx.clone();
+                    let app = harness.state_mut();
+                    app.task_editor = None;
+                    app.updater =
+                        crate::update::Updater::with_fetch(std::sync::Arc::new(move || {
+                            Ok(json.to_owned())
+                        }));
+                    app.updater.check(&ctx);
+                    app.update_dialog = true;
+                    for _ in 0..100 {
+                        harness.run_steps(1);
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    let image = harness.render().expect("render");
+                    image.save(format!("{prefix}-update.png")).expect("save");
+                    harness.state_mut().update_dialog = false;
+                    harness.run_steps(4);
+                }
 
                 let app = harness.state_mut();
                 app.task_editor = None;
