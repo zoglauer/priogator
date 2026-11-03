@@ -86,19 +86,73 @@ After a change the owner will look at, rebuild and reinstall the app:
   deleted }`. Merging is last-writer-wins per record; deletions are
   tombstones (`deleted: true`), never removed outright.
 - Files are written atomically (temp file + rename). Files have a `format`
-  number (`FORMAT_VERSION` in `storage.rs`); bump it only for incompatible
-  changes, and keep reading old files. New fields need `#[serde(default)]`.
+  number (`FORMAT_VERSION` in `storage.rs`). **Bump it whenever a record's
+  serialized fields change** (new field, rename, skip rules): an app that
+  sees a newer format anywhere in the sync folder stops saving
+  (`Waiting::NewerFormat`) until it is updated, so it can't drop fields it
+  doesn't know. Keep reading old formats; new fields need `#[serde(default)]`.
+- From format 2 every file has a `checksum` (FNV-1a 64 of its compact JSON
+  without the checksum, recomputed by re-serializing what was read, so
+  serialization must round-trip exactly; another reason to bump the format
+  on any change). A mismatch means damaged: not read; for the own file the
+  "⚠ Not saved" dialog offers a backup or continuing without it.
+- One instance per user: `storage::single_instance` locks
+  `.priogator.lock` in the settings folder (main.rs); a second start says so
+  and quits.
 - Recurring tasks: completing one creates the next occurrence with a
   deterministic id `Uuid::new_v5(&id, b"next occurrence")`, so two
   computers completing the same task don't create duplicates; reopening
   deletes that successor.
+- `SyncFolder::not_saving()` says when saving waits; the toolbar shows it
+  as "⚠ Not saved", deliberately apart from the dismissable problems, so
+  dismissing those never allows overwriting:
+  - own file unreadable or failing its checksum (at load, a scan, or
+    before overwriting): a copy `damaged-…-device-<name>.json` is kept (not
+    scanned as a device file); clicking "⚠ Not saved" opens a dialog:
+    restore a backup (which ends the wait), or continue (`save_anyway`);
+  - sync folder can't be listed (`scan` returns the error; only a missing
+    folder counts as empty): waits until it can, then reads everything;
+  - another copy of the app holds `.device-<name>.lock` (`File::try_lock`,
+    released when the process ends; a second guard besides the single
+    instance lock, e.g. two settings folders with one device name): waits,
+    takes over when it quits, and reads its file first;
+  - a device file has a newer format: waits until this app is updated
+    (clicking the warning checks for updates).
+  Daily backups wait too (the board may be incomplete).
+- Before writing, an own file that changed since our last read/write is
+  merged in (`save` takes `&mut Board`), never just overwritten.
+- After a merge, a task whose group is now in another area follows the
+  group (`Board::follow_moved_groups`), the same in either merge order.
+  And an open recurring task whose open successor exists was completed
+  elsewhere: it is marked done again (`keep_completions`), keeping edits,
+  unless it was reopened by hand (`TaskItem.reopened`).
+- Reopening a recurring task deletes its open successor only if that wasn't
+  edited (stamped more than a second after its creation); else both stay
+  open (the owner's choice).
+- Active hours with equal from/to mean all day on the chosen days.
+- Editing a record deleted elsewhere brings it back: tasks (dialog save),
+  areas (`update_area`, or a task added/moved into it), groups
+  (`update_group`).
+- Monthly/yearly series keep their day of the month in
+  `TaskItem.repeat_day` (Jan 31 → Feb 28 → Mar 31); a deadline set by hand
+  resets it. Day counts from files are clamped (`MAX_DAYS`), and repeat
+  spans and loops are limited, so damaged values can't panic or hang.
+- Settings: only a missing `config.json` means first start. Unreadable or
+  invalid settings are reported (a dialog via rfd) and left alone.
 - Undo/redo and backup restore go through `Board::restore`.
 - Backups: `backup-YYYY-MM-DD-HHMMSS.json`, one automatic per day, kept:
   all from the last 7 days, then weekly up to 2 months, monthly up to 2
-  years, yearly after that.
+  years, yearly after that. `prune` deletes at most `MAX_PRUNED` (3) per
+  run, newest first, so a wrong clock can't wipe the history. No daily
+  backup while saving waits (the board may be incomplete). Quitting with
+  unsaved changes that can't be saved writes a rescue backup.
+- Files are fsynced before the rename (`write_atomic`; temp names are
+  unique per write). On macOS `sync_all` is a full flush, so don't save
+  every frame: the settings dialog saves once a drag is over.
 - Rename migration (`Config::load_or_create`): contents of the old
   `Prioritizer` config/data folders move into the `Priogator` ones, and
-  `sync_dir`/`backup_dir` paths in the config are rebased.
+  `sync_dir`/`backup_dir` paths in the config are rebased. The work is in
+  `Config::load_from(new, old)`, which tests call with temporary folders.
 
 ## UI conventions and owner preferences
 
@@ -139,7 +193,7 @@ After a change the owner will look at, rebuild and reinstall the app:
 
 ## Tests
 
-~280 tests, all run by `cargo test` in a few seconds (plus the two preview
+~330 tests, all run by `cargo test` in a few seconds (plus the two preview
 renderers, `--ignored`). Every feature gets a test; add one with each change.
 
 - Data: `mod tests` in each module (board, storage, backup, model, repeat,
@@ -209,8 +263,11 @@ intact, TeamIdentifier Z86A9UVWNP, spctl/notarized), replace the bundle
 (stage, swap, keep old until done), restart via a small shell waiting for
 our pid. Development/test builds (not in a .app) refuse to install. Tests
 never touch the network: `demo_config` has `check_updates: false` and UI
-tests inject `Updater::with_fetch`. `cargo test real_update -- --ignored`
-does the real download + install into a temp folder.
+tests inject `Updater::with_fetch`. Installing goes through a `System` trait (commands
+and renames); the tests use a fake one to try each failure (download,
+mount, damaged, other team, not notarized, copy, swap) and check the old
+app is untouched. `cargo test real_update -- --ignored` does the real
+download + install into a temp folder.
 
 ## Licenses (keep up to date)
 
@@ -223,8 +280,8 @@ updating dependencies:
    adding it to `accepted` in `about.toml`. Avoid GPL-only dependencies.
 3. Update `THANKS` in `src/app.rs` if a major direct dependency was added.
 
-`licenses::tests::list_is_up_to_date` fails if direct dependencies changed
-version without regenerating.
+`licenses::tests::list_is_up_to_date` compares the list with `cargo tree`
+for all three release targets and fails if any shipped library is missing.
 
 ## Releasing
 
@@ -252,5 +309,4 @@ The DMG's "Read Me First.txt" (`assets/dmg-read-me-first.txt`) and
 ## Open ideas (not started)
 
 - Test on Linux (fonts, file dialog, launcher entry).
-- Protect against a damaged own sync file.
 - Linux build in the release workflow.

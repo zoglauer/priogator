@@ -10,7 +10,8 @@ use crate::repeat::WEEKDAY_BUTTONS;
 pub struct ActiveHours {
     /// 1 = Monday … 7 = Sunday.
     pub weekdays: Vec<i8>,
-    /// Minutes after midnight; the window is `from..to` on each weekday.
+    /// Minutes after midnight; the window is `from..to` on each weekday,
+    /// and the whole day when the two are equal (e.g. 00:00–00:00).
     pub from: u16,
     pub to: u16,
     /// Active *outside* the window instead (e.g. Family: not during work hours).
@@ -35,7 +36,9 @@ impl ActiveHours {
         let day = now.date().weekday().to_monday_one_offset();
         let minute = now.hour() as u16 * 60 + now.minute() as u16;
         let on = |d: i8| self.weekdays.contains(&d);
-        let in_window = if self.from <= self.to {
+        let in_window = if self.from == self.to {
+            on(day)
+        } else if self.from < self.to {
             on(day) && (self.from..self.to).contains(&minute)
         } else {
             // Past midnight, e.g. Monday 22:00–02:00 runs into Tuesday morning.
@@ -45,14 +48,18 @@ impl ActiveHours {
         in_window != self.outside
     }
 
-    /// E.g. "Mo–Fr 08:00–17:00", or "outside Mo–Fr 08:00–17:00".
+    /// E.g. "Mo–Fr 08:00–17:00", "Sa, Su all day", or "outside Mo–Fr 08:00–17:00".
     pub fn summary(&self) -> String {
-        let window = format!(
-            "{} {}–{}",
-            days(&self.weekdays),
-            clock(self.from),
-            clock(self.to)
-        );
+        let window = if self.from == self.to {
+            format!("{} all day", days(&self.weekdays))
+        } else {
+            format!(
+                "{} {}–{}",
+                days(&self.weekdays),
+                clock(self.from),
+                clock(self.to)
+            )
+        };
         if self.outside {
             format!("outside {window}")
         } else {
@@ -152,21 +159,31 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_window_is_never_active() {
-        let empty = ActiveHours {
+    fn equal_times_mean_all_day() {
+        let weekends = ActiveHours {
+            weekdays: vec![6, 7],
+            from: 0,
+            to: 0,
+            outside: false,
+        };
+        assert!(weekends.is_active(at(6, 0, 0)));
+        assert!(weekends.is_active(at(7, 23, 59)));
+        assert!(!weekends.is_active(at(1, 12, 0)), "Monday");
+        assert_eq!(weekends.summary(), "Sa, Su all day");
+        // Any equal times, and the reverse: active on the other days.
+        let nine = ActiveHours {
             from: 9 * 60,
             to: 9 * 60,
             ..ActiveHours::default()
         };
-        assert!(!empty.is_active(at(1, 9, 0)));
-        assert!(!empty.is_active(at(1, 12, 0)));
-        // ... and outside of it, always.
-        let always = ActiveHours {
+        assert!(nine.is_active(at(1, 3, 0)));
+        let not_weekdays = ActiveHours {
             outside: true,
-            ..empty
+            ..nine
         };
-        assert!(always.is_active(at(1, 9, 0)));
-        assert!(always.is_active(at(6, 3, 0)));
+        assert!(!not_weekdays.is_active(at(1, 9, 0)));
+        assert!(not_weekdays.is_active(at(6, 3, 0)));
+        assert_eq!(not_weekdays.summary(), "outside Mo–Fr all day");
     }
 
     #[test]

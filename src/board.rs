@@ -24,6 +24,9 @@ const DEFAULT_AREAS: [(u128, &str); 4] = [
 
 /// Below this gap between neighbouring ranks the list gets renumbered.
 const MIN_RANK_GAP: f64 = 1e-6;
+/// Upper limit for day counts read from files (lead times, done days):
+/// far beyond what the UI allows, well within what dates can do.
+const MAX_DAYS: i64 = 36_500;
 
 /// Default for how many days ahead a deadline puts a task in the top section.
 pub const DEFAULT_HORIZON_DAYS: i64 = 10;
@@ -153,7 +156,56 @@ impl Board {
         let a = merge_records(&mut self.areas, areas);
         let g = merge_records(&mut self.groups, groups);
         let t = merge_records(&mut self.tasks, tasks);
+        self.follow_moved_groups();
+        self.keep_completions();
         a | g | t
+    }
+
+    /// A recurring task done on one computer and edited (or skipped) on the
+    /// other before they synced: the edit is newer, so the task arrives open
+    /// again, while its next occurrence (made by completing it) is there too.
+    /// Both would show. The completion stands; the edit is kept as well.
+    /// (Reopening deletes an open next occurrence, so this can't be meant.)
+    fn keep_completions(&mut self) {
+        let redone: Vec<(Uuid, Timestamp)> = self
+            .tasks
+            .values()
+            .filter(|t| !t.done && !t.meta.deleted && t.repeat.is_some() && !t.reopened)
+            .filter_map(|t| {
+                let next = self.tasks.get(&successor_id(t.meta.id))?;
+                (!next.done && !next.meta.deleted).then_some((t.meta.id, next.created_at))
+            })
+            .collect();
+        for (id, completed_at) in redone {
+            self.update_task(id, |t| {
+                t.done = true;
+                t.completed_at = Some(completed_at);
+            });
+        }
+    }
+
+    /// A task's group must be in the task's area. After two computers
+    /// changed things at the same time it may not be, e.g. one added a task
+    /// to a group while the other moved the group elsewhere. Then the task
+    /// follows its group, as if it had been there for the move; whichever
+    /// order the changes arrive in, the result is the same.
+    fn follow_moved_groups(&mut self) {
+        let moves: Vec<(Uuid, Uuid)> = self
+            .tasks
+            .values()
+            .filter(|t| !t.meta.deleted)
+            .filter_map(|t| {
+                let group = self.group(t.group?)?;
+                let to = group.area;
+                (to != t.area && self.areas.contains_key(&to)).then_some((t.meta.id, to))
+            })
+            .collect();
+        for (id, area) in moves {
+            self.update_task(id, |t| {
+                t.area = area;
+                t.top_rank = None;
+            });
+        }
     }
 
     /// Undo: bring every record back to its state in `snapshot`.
@@ -196,11 +248,14 @@ impl Board {
             .filter(move |t| t.area == area && !t.done && !t.meta.deleted)
     }
 
-    /// The last day whose deadlines count as close.
     /// Whether the task's deadline is close enough to put it on top: within
     /// its own lead time, or the app-wide one. Overdue counts too.
     fn due_soon(&self, task: &TaskItem) -> bool {
-        let lead = task.lead_days.unwrap_or(self.horizon_days);
+        // (Limited: a damaged file's huge value mustn't panic at every frame.)
+        let lead = task
+            .lead_days
+            .unwrap_or(self.horizon_days)
+            .clamp(0, MAX_DAYS);
         task.deadline
             .is_some_and(|d| d <= self.today.saturating_add(jiff::Span::new().days(lead)))
     }
@@ -246,7 +301,9 @@ impl Board {
     /// Tasks completed after this count as recently done; older ones are hidden.
     fn done_since(&self) -> Timestamp {
         Timestamp::now()
-            .checked_sub(jiff::SignedDuration::from_hours(24 * self.done_days))
+            .checked_sub(jiff::SignedDuration::from_hours(
+                24 * self.done_days.clamp(0, MAX_DAYS),
+            ))
             .unwrap_or(Timestamp::UNIX_EPOCH)
     }
 
@@ -306,6 +363,7 @@ impl Board {
         group: Option<Uuid>,
         deadline: Option<Date>,
     ) -> Uuid {
+        self.revive_area(area);
         let rank = self.bottom_rank(area, None);
         let meta = Meta::new(&self.device);
         let id = meta.id;
@@ -325,6 +383,8 @@ impl Board {
                 lead_days: None,
                 repeat: None,
                 color: None,
+                repeat_day: None,
+                reopened: false,
                 done: false,
                 created_at: Timestamp::now(),
                 completed_at: None,
@@ -343,10 +403,13 @@ impl Board {
 
     /// Complete or reopen a task. Completing a recurring task also creates
     /// its next occurrence; reopening it removes that again.
+    /// Reopening keeps a next occurrence that was edited meanwhile (a note,
+    /// another date, a ticked subtask): then both are open.
     pub fn set_done(&mut self, id: Uuid, done: bool) {
         self.update_task(id, |t| {
             t.done = done;
             t.completed_at = done.then(Timestamp::now);
+            t.reopened = false;
         });
         let Some(task) = self.tasks.get(&id) else {
             return;
@@ -357,11 +420,24 @@ impl Board {
         let next_id = successor_id(id);
         if done {
             self.create_successor(id, next_id);
-        } else if self
+            return;
+        }
+        let Some(next) = self
             .tasks
             .get(&next_id)
-            .is_some_and(|t| !t.done && !t.meta.deleted)
-        {
+            .filter(|t| !t.done && !t.meta.deleted)
+        else {
+            return;
+        };
+        // Any change gets a new stamp; created and stamped together otherwise.
+        let edited = next.meta.updated_at
+            > next
+                .created_at
+                .checked_add(jiff::SignedDuration::from_secs(1))
+                .unwrap_or(next.created_at);
+        if edited {
+            self.update_task(id, |t| t.reopened = true);
+        } else {
             self.delete_task(next_id);
         }
     }
@@ -369,15 +445,22 @@ impl Board {
     /// The next occurrence of recurring task `id`, in its place: same area,
     /// group, notes, position and pinning; subtasks unticked; new due date.
     fn create_successor(&mut self, id: Uuid, next_id: Uuid) {
+        // Still there (maybe done or edited since): keep it as it is.
+        if self.tasks.get(&next_id).is_some_and(|t| !t.meta.deleted) {
+            return;
+        }
         let task = &self.tasks[&id];
         let Some(repeat) = &task.repeat else {
             return;
         };
         let due = task.deadline.unwrap_or(self.today);
+        let day = task.repeat_day.unwrap_or(due.day());
         let mut next = task.clone();
-        next.deadline = Some(repeat.next(due, self.today));
+        next.deadline = Some(repeat.next_on_day(due, self.today, day));
+        next.repeat_day = Some(day);
         next.done = false;
         next.completed_at = None;
+        next.reopened = false;
         next.created_at = Timestamp::now();
         for subtask in &mut next.subtasks {
             subtask.done = false;
@@ -399,7 +482,9 @@ impl Board {
         self.update_task(id, |t| {
             if let Some(repeat) = &t.repeat {
                 let due = t.deadline.unwrap_or(today);
-                t.deadline = Some(repeat.next(due, today));
+                let day = t.repeat_day.unwrap_or(due.day());
+                t.deadline = Some(repeat.next_on_day(due, today, day));
+                t.repeat_day = Some(day);
             }
         });
     }
@@ -446,6 +531,8 @@ impl Board {
         self.update_task(id, |t| {
             t.area = area;
             t.pinned = true;
+            // A position from an earlier time on top doesn't apply any more.
+            t.top_rank = None;
             if !keep_group {
                 t.group = None;
             }
@@ -456,6 +543,7 @@ impl Board {
     /// pinning it unless it's there anyway because it's due soon. Fixes the
     /// current order of the section, so nothing else moves.
     pub fn move_in_top(&mut self, id: Uuid, area: Uuid, index: usize) {
+        self.revive_area(area);
         let Some(task) = self.tasks.get(&id) else {
             return;
         };
@@ -486,13 +574,15 @@ impl Board {
     /// Unpins it; a deadline close enough to keep it in the top section is
     /// removed, farther ones stay.
     pub fn move_task(&mut self, id: Uuid, area: Uuid, index: usize) {
-        let others: Vec<f64> = self
+        self.revive_area(area);
+        let (mut order, others): (Vec<Uuid>, Vec<f64>) = self
             .priority_list(area)
             .into_iter()
             .filter(|t| t.meta.id != id)
-            .map(|t| t.rank)
-            .collect();
+            .map(|t| (t.meta.id, t.rank))
+            .unzip();
         let index = index.min(others.len());
+        order.insert(index, id);
         let prev = index.checked_sub(1).map(|i| others[i]);
         let next = others.get(index).copied();
         let rank = match (prev, next) {
@@ -518,7 +608,9 @@ impl Board {
         });
         let too_close = |other: Option<f64>| other.is_some_and(|o| (o - rank).abs() < MIN_RANK_GAP);
         if too_close(prev) || too_close(next) {
-            self.renumber(area);
+            // E.g. between two equal ranks (added on two devices): the
+            // requested order decides, not the order the list sorts them in.
+            self.renumber(order);
         }
     }
 
@@ -526,18 +618,31 @@ impl Board {
     /// (unpinned, deadline removed or moved further out, or moved to another
     /// column) goes to its bottom.
     pub fn update_details(&mut self, id: Uuid, details: TaskDetails) {
-        let Some(task) = self.tasks.get(&id) else {
+        if !self.tasks.contains_key(&id) {
             return;
-        };
+        }
+        self.revive_area(details.area);
+        let task = &self.tasks[&id];
         let was_in_list = !self.in_top(task) && task.area == details.area;
         let group = details
             .group
             .filter(|g| self.group(*g).is_some_and(|g| g.area == details.area));
         self.update_task(id, |t| {
+            // Deleted on another computer while its dialog was open here:
+            // saving is the newer change and brings it back.
+            t.meta.deleted = false;
+            // A position from an earlier time on top doesn't apply any more.
+            if t.pinned != details.pinned || t.area != details.area {
+                t.top_rank = None;
+            }
             t.title = details.title.trim().to_owned();
             t.notes = details.notes;
             t.area = details.area;
             t.group = group;
+            // A deadline set by hand starts the series anew on its day.
+            if t.deadline != details.deadline {
+                t.repeat_day = None;
+            }
             t.deadline = details.deadline;
             t.pinned = details.pinned;
             t.lead_days = details.lead_days;
@@ -579,10 +684,22 @@ impl Board {
         id
     }
 
+    /// Change an area and record the change. Changing one that was deleted
+    /// on another computer (it still shows while it has open tasks) brings
+    /// it back for good, like saving a task deleted elsewhere does.
     fn update_area(&mut self, id: Uuid, change: impl FnOnce(&mut Area)) {
         if let Some(area) = self.areas.get_mut(&id) {
+            area.meta.deleted = false;
             change(area);
             area.meta.touch(&self.device);
+        }
+    }
+
+    /// Tasks put into a deleted area (shown because of its open tasks) bring
+    /// it back, so it doesn't vanish again once those are done.
+    fn revive_area(&mut self, id: Uuid) {
+        if self.areas.get(&id).is_some_and(|a| a.meta.deleted) {
+            self.update_area(id, |_| {});
         }
     }
 
@@ -668,8 +785,10 @@ impl Board {
         id
     }
 
+    /// (Like areas: saving a group deleted elsewhere meanwhile brings it back.)
     pub fn update_group(&mut self, id: Uuid, name: &str, color: [u8; 3]) {
         if let Some(group) = self.groups.get_mut(&id) {
+            group.meta.deleted = false;
             group.name = name.trim().to_owned();
             group.color = color;
             group.meta.touch(&self.device);
@@ -739,8 +858,8 @@ impl Board {
     }
 
     /// Give the priority list of `area` evenly spaced ranks 0, 1, 2, …
-    fn renumber(&mut self, area: Uuid) {
-        let ids: Vec<Uuid> = self.priority_list(area).iter().map(|t| t.meta.id).collect();
+    /// Ranks 0, 1, 2… in the given order.
+    fn renumber(&mut self, ids: Vec<Uuid>) {
         for (i, id) in ids.into_iter().enumerate() {
             if self.tasks[&id].rank != i as f64 {
                 self.update_task(id, |t| t.rank = i as f64);
@@ -946,6 +1065,29 @@ mod tests {
         assert_eq!(titles(&b, area), ["c", "b", "a"]);
         b.move_task(a, area, 1);
         assert_eq!(titles(&b, area), ["c", "a", "b"]);
+    }
+
+    #[test]
+    fn moving_between_equal_ranks_lands_where_dropped() {
+        // Two devices added tasks independently: same rank. Equal ranks sort
+        // by id, and these ids put "t" last, wherever it's dropped.
+        let (mut b, area) = board_with_area("mac");
+        let mut add = |title: &str, id: u128| {
+            let random = b.add_task(area, title, None, None);
+            let mut task = b.tasks.remove(&random).unwrap();
+            task.meta.id = Uuid::from_u128(id);
+            task.rank = 0.0;
+            b.tasks.insert(task.meta.id, task);
+            Uuid::from_u128(id)
+        };
+        add("a", 1);
+        add("c", 2);
+        let t = add("t", 3);
+        assert_eq!(titles(&b, area), ["a", "c", "t"]);
+        b.move_task(t, area, 1);
+        assert_eq!(titles(&b, area), ["a", "t", "c"]);
+        b.move_task(t, area, 0);
+        assert_eq!(titles(&b, area), ["t", "a", "c"]);
     }
 
     #[test]
@@ -1340,6 +1482,34 @@ mod tests {
     }
 
     #[test]
+    fn redoing_an_earlier_occurrence_keeps_the_later_ones() {
+        let (mut b, area) = board_with_area("mac");
+        let first = b.add_task(area, "trash", None, Some(date(2026, 10, 30)));
+        make_recurring(&mut b, first, weekly_friday());
+        b.set_done(first, true);
+        let second = successor_id(first);
+        b.update_task(second, |t| t.notes = "used the new bins".to_owned());
+        b.set_done(second, true);
+        let third = successor_id(second);
+
+        // The second one is done, so reopening the first leaves it alone…
+        b.set_done(first, false);
+        assert!(!b.tasks[&second].meta.deleted);
+        // …and completing the first again doesn't overwrite it.
+        b.set_done(first, true);
+        let kept = &b.tasks[&second];
+        assert!(kept.done);
+        assert_eq!(kept.notes, "used the new bins");
+        let open: Vec<_> = b
+            .tasks
+            .values()
+            .filter(|t| t.title == "trash" && !t.done && !t.meta.deleted)
+            .map(|t| t.meta.id)
+            .collect();
+        assert_eq!(open, [third], "still only one open occurrence");
+    }
+
+    #[test]
     fn overdue_recurring_task_stays_until_done_then_jumps_ahead() {
         let (mut b, area) = board_with_area("mac");
         let trash = b.add_task(area, "trash", None, Some(date(2026, 10, 9)));
@@ -1422,6 +1592,200 @@ mod tests {
         assert_eq!(b.tasks[&due].group, Some(clients), "tasks keep their group");
         assert_eq!(b.tasks[&done].area, house, "done tasks move along");
         assert!(b.groups_of(work).is_empty());
+    }
+
+    #[test]
+    fn a_task_added_to_a_group_moved_meanwhile_follows_the_group() {
+        // Both computers start from the same state.
+        let (mut mac, work) = board_with_area("mac");
+        let house = mac.areas_sorted()[2].meta.id;
+        let clients = mac.add_group(work, "Clients", GROUP_COLORS[0]);
+        let old = mac.add_task(work, "already there", Some(clients), None);
+        let mut linux = mac.clone();
+        linux.device = "linux".into();
+
+        // Offline: the Mac adds a task to Clients, Linux moves Clients.
+        let new = mac.add_task(work, "added on the Mac", Some(clients), None);
+        linux.move_group(clients, house);
+
+        // Either way round, both end up the same: everything in House.
+        let mut mac_first = mac.clone();
+        sync(&linux, &mut mac_first);
+        let mut linux_first = linux.clone();
+        sync(&mac, &mut linux_first);
+        for board in [&mac_first, &linux_first] {
+            assert_eq!(board.groups[&clients].area, house);
+            for task in [old, new] {
+                assert_eq!(board.tasks[&task].area, house);
+                assert_eq!(board.tasks[&task].group, Some(clients));
+            }
+            assert!(titles(board, work).is_empty());
+        }
+        // And stay so once each has the other's result.
+        sync(&linux_first, &mut mac_first);
+        sync(&mac_first, &mut linux_first);
+        assert_eq!(mac_first.tasks[&new].area, house);
+        assert_eq!(linux_first.tasks[&new].area, house);
+        assert_eq!(mac_first.tasks[&new], linux_first.tasks[&new]);
+    }
+
+    #[test]
+    fn a_task_in_a_deleted_group_stays_where_it_is() {
+        let (mut mac, work) = board_with_area("mac");
+        let clients = mac.add_group(work, "Clients", GROUP_COLORS[0]);
+        let mut linux = mac.clone();
+        linux.device = "linux".into();
+        let task = mac.add_task(work, "added on the Mac", Some(clients), None);
+        linux.delete_group(clients);
+        sync(&linux, &mut mac);
+        assert_eq!(mac.tasks[&task].area, work);
+        assert!(mac.group(clients).is_none());
+    }
+
+    #[test]
+    fn done_on_one_computer_and_edited_on_the_other_stays_done() {
+        let (mut mac, area) = board_with_area("mac");
+        let trash = mac.add_task(area, "trash", None, Some(date(2026, 10, 30)));
+        make_recurring(&mut mac, trash, weekly_friday());
+        let mut linux = mac.clone();
+        linux.device = "linux".into();
+
+        mac.set_done(trash, true);
+        // Later, not synced yet: Linux adds a note.
+        linux.update_task(trash, |t| t.notes = "blue bin".into());
+
+        let mut mac_after = mac.clone();
+        sync(&linux, &mut mac_after);
+        let mut linux_after = linux.clone();
+        sync(&mac, &mut linux_after);
+        for board in [&mac_after, &linux_after] {
+            let open: Vec<_> = board
+                .tasks
+                .values()
+                .filter(|t| t.title == "trash" && !t.done && !t.meta.deleted)
+                .collect();
+            assert_eq!(open.len(), 1, "only the next one is open");
+            assert!(board.tasks[&trash].done);
+            assert_eq!(board.tasks[&trash].notes, "blue bin", "the edit stays");
+        }
+        // Reopening on purpose still works.
+        mac_after.set_done(trash, false);
+        assert!(!mac_after.tasks[&trash].done);
+        assert!(mac_after.tasks[&successor_id(trash)].meta.deleted);
+    }
+
+    #[test]
+    fn an_area_deleted_elsewhere_stays_once_it_is_used_here() {
+        let (mut mac, work) = board_with_area("mac");
+        let mut linux = mac.clone();
+        linux.device = "linux".into();
+        mac.delete_area(work);
+        let task = linux.add_task(work, "added on Linux", None, None);
+        sync(&linux, &mut mac);
+        assert!(
+            mac.areas_sorted().iter().any(|a| a.meta.id == work),
+            "shown"
+        );
+
+        // Renamed here, then its only task done: it stays.
+        mac.rename_area(work, "Job");
+        mac.set_done(task, true);
+        assert!(mac.areas_sorted().iter().any(|a| a.meta.id == work));
+        // A task added to such an area keeps it too.
+        let (mut mac2, _) = board_with_area("mac");
+        let mut linux2 = mac2.clone();
+        linux2.device = "linux".into();
+        mac2.delete_area(work);
+        let t = linux2.add_task(work, "added on Linux", None, None);
+        sync(&linux2, &mut mac2);
+        mac2.add_task(work, "added here", None, None);
+        mac2.set_done(t, true);
+        assert!(!mac2.areas[&work].meta.deleted);
+    }
+
+    #[test]
+    fn a_group_deleted_elsewhere_comes_back_when_saved() {
+        let (mut b, work) = board_with_area("mac");
+        let clients = b.add_group(work, "Clients", GROUP_COLORS[0]);
+        b.delete_group(clients);
+        b.update_group(clients, "Customers", GROUP_COLORS[1]);
+        assert_eq!(b.group(clients).map(|g| g.name.as_str()), Some("Customers"));
+    }
+
+    #[test]
+    fn huge_numbers_from_a_damaged_file_dont_panic() {
+        let (mut b, area) = board_with_area("mac");
+        let t = b.add_task(area, "far", None, Some(date(2026, 11, 1)));
+        b.update_task(t, |t| t.lead_days = Some(i64::MAX));
+        b.done_days = i64::MAX;
+        assert_eq!(top_titles(&b, area), ["far"]);
+        b.update_task(t, |t| t.lead_days = Some(i64::MIN));
+        b.horizon_days = i64::MIN;
+        let _ = b.top_list(area);
+        let _ = b.done_list(area);
+        let _ = b.stats(TODAY);
+    }
+
+    #[test]
+    fn pinning_starts_at_the_end_of_the_arranged_ones() {
+        let (mut b, area) = board_with_area("mac");
+        let a = b.add_task(area, "a", None, None);
+        let c = b.add_task(area, "c", None, None);
+        let t = b.add_task(area, "t", None, None);
+        b.move_in_top(a, area, 0);
+        b.move_in_top(t, area, 0);
+        b.move_in_top(c, area, 0);
+        assert_eq!(top_titles(&b, area), ["c", "t", "a"]);
+        // t is unpinned in its dialog, and pinned again later: not back at
+        // its old place.
+        let mut details = TaskDetails::from(&b.tasks[&t]);
+        details.pinned = false;
+        b.update_details(t, details);
+        assert_eq!(top_titles(&b, area), ["c", "a"]);
+        b.pin(t, area);
+        assert_eq!(top_titles(&b, area), ["c", "a", "t"]);
+    }
+
+    #[test]
+    fn reopening_keeps_a_next_occurrence_edited_meanwhile() {
+        let (mut mac, area) = board_with_area("mac");
+        let trash = mac.add_task(area, "trash", None, Some(date(2026, 10, 30)));
+        make_recurring(&mut mac, trash, weekly_friday());
+        mac.set_done(trash, true);
+        let next = successor_id(trash);
+        mac.update_task(next, |t| t.notes = "blue bin".into());
+        // (An edit comes later than the second it was made in.)
+        let later = mac.tasks[&next]
+            .created_at
+            .checked_add(jiff::SignedDuration::from_secs(60))
+            .unwrap();
+        mac.tasks.get_mut(&next).unwrap().meta.updated_at = later;
+
+        mac.set_done(trash, false);
+        assert!(!mac.tasks[&trash].done);
+        let kept = &mac.tasks[&next];
+        assert!(!kept.meta.deleted && !kept.done);
+        assert_eq!(kept.notes, "blue bin");
+
+        // Syncing doesn't take it for a completion elsewhere.
+        let mut linux = Board::new("linux");
+        linux.today = TODAY;
+        sync(&mac, &mut linux);
+        sync(&linux, &mut mac);
+        assert!(!mac.tasks[&trash].done);
+        assert!(!linux.tasks[&trash].done);
+
+        // Done again: no third occurrence, the edited one stays the next.
+        mac.set_done(trash, true);
+        let open: Vec<Uuid> = mac
+            .tasks
+            .values()
+            .filter(|t| t.title == "trash" && !t.done && !t.meta.deleted)
+            .map(|t| t.meta.id)
+            .collect();
+        assert_eq!(open, [next]);
+        assert_eq!(mac.tasks[&next].notes, "blue bin");
+        assert!(!mac.tasks[&trash].reopened);
     }
 
     #[test]

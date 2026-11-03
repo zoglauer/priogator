@@ -158,7 +158,8 @@ In the task dialog, set **Repeat**:
 
 - **On a schedule:** *Every [1] [week]* on the weekdays you click (Mo … Su),
   or every N days, months or years. Monthly and yearly repeats keep the day
-  of the deadline; the 31st becomes the last day in shorter months.
+  of the deadline; the 31st becomes the last day in shorter months, and the
+  31st again in the next long one.
 - **After it's done:** *[2] [months] after it's done*. The next one is due
   that long after the day you tick it off.
 
@@ -177,7 +178,9 @@ weeks don't pile up.
 
 **Skip this time** (right-click) moves it on to the next date without
 counting it as done. To stop repeating, set **Repeat** to *Never*, or delete
-the task. Unticking a done occurrence removes the next one again.
+the task. Unticking a done occurrence removes the next one again, unless
+you've changed that one meanwhile (a note, its date, a subtask): then both
+stay open.
 
 On the card, ↻ marks a recurring task; hover over it to see how often.
 
@@ -314,7 +317,9 @@ open tasks and, in red, how many are overdue, so nothing urgent can hide.
   the weekdays, set **from** and **to** (click a time and type, e.g. `08:30`,
   or drag sideways), and choose **Active during these times** or **Active
   outside them**. For *Family*, use the same days and times as *Work* with
-  *outside*: then it's open in the evenings and at weekends.
+  *outside*: then it's open in the evenings and at weekends. The same time
+  for **from** and **to** (e.g. 00:00 and 00:00) means **all day** on the
+  chosen days.
 - **Automatic:** areas fold and unfold by themselves when the app starts and
   whenever their active time begins or ends.
 - **Peek in:** click a folded strip to open the area. It folds again as soon
@@ -351,7 +356,14 @@ midnight if it's still running. Old backups are thinned out automatically:
 | up to 2 years | one per month |
 | older | one per year |
 
+At most three old backups are removed per day, so a clock that is wrong for
+a while (set ahead by hand, for example) can't wipe out the older ones.
+
 Backups stay on each computer and are not synced.
+
+If you quit while changes couldn't be saved (see **⚠ Not saved** under
+syncing), Priogator puts them into an extra backup instead, so you can
+restore them later.
 
 **Restoring.** Open **☰ → Backups…**, or **Manage backups…** in Settings.
 
@@ -380,6 +392,28 @@ service.
 - If you edit on both, nothing is lost. For each task, area and group, the
   newest change wins, and deletions carry over.
 - While the app runs, it checks for changes every 2 seconds.
+- If this computer's own file can't be read (damaged, or written by a newer
+  Priogator), a copy is kept next to it as `damaged-<date>-device-<name>.json`
+  and **⚠ Not saved** appears in the toolbar. Priogator checks this at start,
+  at every scan, and right before saving. It doesn't save until you click
+  **⚠ Not saved**, so nothing overwrites the file before you've decided. To
+  get your tasks back, restore a backup (☰ → Backups…) or open the copy with
+  **Restore from file…** if it's still readable.
+- Every file carries a checksum. A file changed by anything else (cut short
+  by a crash, damaged on disk, edited by hand) isn't read. If it's this
+  computer's own file, click **⚠ Not saved**: **Restore a backup…** is the
+  usual way out; **Continue without it** saves what's shown over it.
+- If the other computer runs a **newer Priogator** that writes a newer file
+  format, this one stops saving and asks to be updated (click **⚠ Not
+  saved** to check for updates). That way an older version never writes
+  back tasks without the details it doesn't know about.
+- **⚠ Not saved** also appears while the sync folder can't be read. Your
+  changes stay in the window and are saved once it can be read again. Hover
+  over it for the reason.
+- Priogator runs only once at a time; starting it a second time just says
+  so.
+- If a group was moved to another area on one computer while a task was
+  added to it on the other, the task moves along with its group.
 
 You only have to keep the sync folder the same on both computers:
 

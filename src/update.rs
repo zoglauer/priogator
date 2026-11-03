@@ -6,10 +6,11 @@
 //! library. Before anything is replaced, the downloaded app must be signed
 //! with our Developer ID and notarized by Apple.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
 use eframe::egui;
 
@@ -48,7 +49,9 @@ pub type Fetch = Arc<dyn Fn() -> Result<String, String> + Send + Sync>;
 pub struct Updater {
     state: Arc<Mutex<State>>,
     fetch: Fetch,
-    last_check: Option<Instant>,
+    /// Wall-clock time, which (unlike `Instant` on macOS) keeps running
+    /// while the Mac sleeps, so a laptop asleep every night still checks daily.
+    last_check: Option<SystemTime>,
 }
 
 impl Updater {
@@ -95,7 +98,7 @@ impl Updater {
         ) {
             return;
         }
-        self.last_check = Some(Instant::now());
+        self.last_check = Some(SystemTime::now());
         Self::set(&self.state, State::Checking);
         let state = self.state.clone();
         let fetch = self.fetch.clone();
@@ -117,7 +120,10 @@ impl Updater {
     /// The automatic check: at start-up, then once a day. An update found
     /// earlier stays offered.
     pub fn check_daily(&mut self, ctx: &egui::Context) {
-        let due = self.last_check.is_none_or(|t| t.elapsed() >= CHECK_EVERY);
+        // (A clock set back counts as due, rather than never.)
+        let due = self
+            .last_check
+            .is_none_or(|t| t.elapsed().map_or(true, |e| e >= CHECK_EVERY));
         if due && !matches!(self.state(), State::Available(_)) {
             self.check(ctx);
         }
@@ -129,7 +135,7 @@ impl Updater {
         let state = self.state.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let new = match install(&release, &bundle) {
+            let new = match install(&Real, &release, &bundle) {
                 Ok(()) => State::Installed(bundle),
                 Err(e) => State::Failed(e),
             };
@@ -217,8 +223,28 @@ pub fn bundle_of(exe: &Path) -> Option<PathBuf> {
     is_bundle.then(|| bundle.to_path_buf())
 }
 
+/// What installing needs from the outside world: commands and renames.
+/// The tests fake it to try every way an update can fail.
+trait System {
+    /// Run a command; its output, or why it failed.
+    fn run(&self, program: &str, args: &[&OsStr]) -> Result<String, String>;
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()>;
+}
+
+struct Real;
+
+impl System for Real {
+    fn run(&self, program: &str, args: &[&OsStr]) -> Result<String, String> {
+        run(program, args)
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::rename(from, to)
+    }
+}
+
 /// Run a command; its output, or why it failed.
-fn run(program: &str, args: &[&std::ffi::OsStr]) -> Result<String, String> {
+fn run(program: &str, args: &[&OsStr]) -> Result<String, String> {
     let output = Command::new(program)
         .args(args)
         .output()
@@ -236,9 +262,9 @@ fn run(program: &str, args: &[&std::ffi::OsStr]) -> Result<String, String> {
 }
 
 /// Signed by us, intact, and notarized by Apple.
-fn verify(app: &Path) -> Result<(), String> {
+fn verify(sys: &dyn System, app: &Path) -> Result<(), String> {
     let app = app.as_os_str();
-    run(
+    sys.run(
         "codesign",
         &[
             "--verify".as_ref(),
@@ -248,13 +274,13 @@ fn verify(app: &Path) -> Result<(), String> {
         ],
     )
     .map_err(|_| "The download isn't intact; nothing was changed.".to_owned())?;
-    let details = run("codesign", &["-dv".as_ref(), app])?;
+    let details = sys.run("codesign", &["-dv".as_ref(), app])?;
     if !details.contains(&format!("TeamIdentifier={TEAM_ID}")) {
         return Err(
             "The download isn't signed by Priogator's developer; nothing was changed.".into(),
         );
     }
-    run(
+    sys.run(
         "spctl",
         &["-a".as_ref(), "-t".as_ref(), "exec".as_ref(), app],
     )
@@ -262,14 +288,19 @@ fn verify(app: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn install(release: &Release, bundle: &Path) -> Result<(), String> {
-    let work = std::env::temp_dir().join(format!("priogator-update-{}", std::process::id()));
+fn install(sys: &dyn System, release: &Release, bundle: &Path) -> Result<(), String> {
+    static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let work = std::env::temp_dir().join(format!(
+        "priogator-update-{}-{}",
+        std::process::id(),
+        COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let dmg = work.join("update.dmg");
     let mount = work.join("mount");
     let result = (|| {
-        run(
+        sys.run(
             "curl",
             &[
                 "--fail".as_ref(),
@@ -285,7 +316,7 @@ fn install(release: &Release, bundle: &Path) -> Result<(), String> {
         )
         .map_err(|e| format!("The download failed. {e}"))?;
         std::fs::create_dir_all(&mount).map_err(|e| e.to_string())?;
-        run(
+        sys.run(
             "hdiutil",
             &[
                 "attach".as_ref(),
@@ -297,8 +328,8 @@ fn install(release: &Release, bundle: &Path) -> Result<(), String> {
                 dmg.as_os_str(),
             ],
         )?;
-        let replaced = replace(&mount.join("Priogator.app"), bundle);
-        let _ = run(
+        let replaced = replace(sys, &mount.join("Priogator.app"), bundle);
+        let _ = sys.run(
             "hdiutil",
             &["detach".as_ref(), "-quiet".as_ref(), mount.as_os_str()],
         );
@@ -310,11 +341,19 @@ fn install(release: &Release, bundle: &Path) -> Result<(), String> {
 
 /// Put the verified `new` app in place of `bundle`, keeping the old one until
 /// the new one is there.
-fn replace(new: &Path, bundle: &Path) -> Result<(), String> {
-    verify(new)?;
+fn replace(sys: &dyn System, new: &Path, bundle: &Path) -> Result<(), String> {
+    verify(sys, new)?;
     let parent = bundle.parent().ok_or("The app has no folder.")?;
     let staged = parent.join(".Priogator-update.app");
     let old = parent.join(".Priogator-old.app");
+    // E.g. after a failed rollback: then the leftover old app below may be
+    // the only copy, and mustn't be cleared away.
+    if !bundle.exists() {
+        return Err(format!(
+            "{} is missing; nothing was changed. Download the update from the releases page.",
+            bundle.display()
+        ));
+    }
     let _ = std::fs::remove_dir_all(&staged);
     let _ = std::fs::remove_dir_all(&old);
     let cant_write = |e: std::io::Error| {
@@ -323,11 +362,29 @@ fn replace(new: &Path, bundle: &Path) -> Result<(), String> {
             parent.display()
         )
     };
-    run("ditto", &[new.as_os_str(), staged.as_os_str()])
-        .map_err(|_| cant_write(std::io::Error::other("copy failed")))?;
-    std::fs::rename(bundle, &old).map_err(cant_write)?;
-    if let Err(e) = std::fs::rename(&staged, bundle) {
-        let _ = std::fs::rename(&old, bundle);
+    if sys
+        .run("ditto", &[new.as_os_str(), staged.as_os_str()])
+        .is_err()
+    {
+        let _ = std::fs::remove_dir_all(&staged);
+        return Err(cant_write(std::io::Error::other("copy failed")));
+    }
+    if let Err(e) = sys.rename(bundle, &old) {
+        let _ = std::fs::remove_dir_all(&staged);
+        return Err(cant_write(e));
+    }
+    if let Err(e) = sys.rename(&staged, bundle) {
+        let _ = std::fs::remove_dir_all(&staged);
+        if let Err(back) = sys.rename(&old, bundle) {
+            // The old app stays where it is; say where, to put it back by hand.
+            return Err(format!(
+                "{} The previous version couldn't be put back either ({back}): it is \
+                 at {}. Rename it to {} in the Finder (it's hidden: ⌘⇧. shows it).",
+                cant_write(e),
+                old.display(),
+                bundle.file_name().unwrap_or_default().to_string_lossy()
+            ));
+        }
         return Err(cant_write(e));
     }
     let _ = std::fs::remove_dir_all(&old);
@@ -457,7 +514,7 @@ mod tests {
         updater.dismiss();
         updater.check_daily(&ctx);
         assert_eq!(updater.state(), State::Idle, "not again the same day");
-        updater.last_check = Some(Instant::now() - CHECK_EVERY);
+        updater.last_check = Some(SystemTime::now() - CHECK_EVERY);
         updater.check_daily(&ctx);
         assert_eq!(wait_while_checking(&updater), State::UpToDate);
     }
@@ -474,8 +531,8 @@ mod tests {
         let bundle = dir.path().join("Priogator.app");
         std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
         std::fs::write(bundle.join("Contents/MacOS/Priogator"), "old").unwrap();
-        install(&release, &bundle).unwrap();
-        verify(&bundle).unwrap();
+        install(&Real, &release, &bundle).unwrap();
+        verify(&Real, &bundle).unwrap();
         let plist = std::fs::read_to_string(bundle.join("Contents/Info.plist")).unwrap();
         assert!(plist.contains(&release.version));
         let leftovers: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
@@ -486,7 +543,211 @@ mod tests {
     fn only_our_signed_and_notarized_app_passes() {
         // A folder that isn't a signed app at all.
         let dir = tempfile::tempdir().unwrap();
-        assert!(verify(dir.path()).is_err());
+        assert!(verify(&Real, dir.path()).is_err());
+    }
+
+    // ----- Installing, with a fake system: every way it can fail ----------
+
+    /// Which step the fake system lets fail.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Fail {
+        Nothing,
+        Download,
+        Mount,
+        Damaged,
+        OtherTeam,
+        NotNotarized,
+        Copy,
+        MoveOldAside,
+        Swap,
+        /// The swap and putting the old app back.
+        SwapAndRollback,
+    }
+
+    /// Commands and renames as on a Mac, without network or Apple's tools.
+    /// "Downloading" and "mounting" give an app whose program says "new".
+    struct Fake {
+        fail: Fail,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl Fake {
+        fn failing(fail: Fail) -> Self {
+            Self {
+                fail,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn called(&self, program: &str) -> bool {
+            self.calls.lock().unwrap().iter().any(|c| c == program)
+        }
+    }
+
+    fn make_app(bundle: &Path, program: &str) {
+        std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+        std::fs::write(bundle.join("Contents/MacOS/Priogator"), program).unwrap();
+    }
+
+    fn program_of(bundle: &Path) -> String {
+        std::fs::read_to_string(bundle.join("Contents/MacOS/Priogator")).unwrap()
+    }
+
+    impl System for Fake {
+        fn run(&self, program: &str, args: &[&OsStr]) -> Result<String, String> {
+            let args: Vec<&Path> = args.iter().map(Path::new).collect();
+            let has = |a: &str| args.contains(&Path::new(a));
+            let step = match program {
+                "codesign" if has("--verify") => Fail::Damaged,
+                "codesign" => Fail::Nothing,
+                "spctl" => Fail::NotNotarized,
+                "curl" => Fail::Download,
+                "hdiutil" if has("attach") => Fail::Mount,
+                "ditto" => Fail::Copy,
+                _ => Fail::Nothing,
+            };
+            self.calls.lock().unwrap().push(program.to_owned());
+            if step != Fail::Nothing && step == self.fail {
+                return Err(format!("{program} failed"));
+            }
+            match program {
+                "codesign" if has("-dv") => Ok(if self.fail == Fail::OtherTeam {
+                    "TeamIdentifier=SOMEONEELS".to_owned()
+                } else {
+                    format!("Identifier=com.andreaszoglauer.priogator\nTeamIdentifier={TEAM_ID}")
+                }),
+                "hdiutil" if has("attach") => {
+                    let at = args.iter().position(|a| *a == Path::new("-mountpoint"));
+                    make_app(&args[at.unwrap() + 1].join("Priogator.app"), "new");
+                    Ok(String::new())
+                }
+                "ditto" => {
+                    make_app(args[1], &program_of(args[0]));
+                    Ok(String::new())
+                }
+                _ => Ok(String::new()),
+            }
+        }
+
+        fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
+            let failing = match (name(from).as_str(), name(to).as_str()) {
+                ("Priogator.app", ".Priogator-old.app") => self.fail == Fail::MoveOldAside,
+                (".Priogator-update.app", "Priogator.app") => {
+                    matches!(self.fail, Fail::Swap | Fail::SwapAndRollback)
+                }
+                (".Priogator-old.app", "Priogator.app") => self.fail == Fail::SwapAndRollback,
+                _ => false,
+            };
+            if failing {
+                return Err(std::io::Error::other("no permission"));
+            }
+            std::fs::rename(from, to)
+        }
+    }
+
+    /// Install over an "old" app with the fake failing at `fail`; the result
+    /// and what's left in the app's folder afterwards.
+    fn install_failing(fail: Fail) -> (Result<(), String>, String, Vec<String>, Fake) {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("Priogator.app");
+        make_app(&bundle, "old");
+        let release = parse_release(LATEST).unwrap();
+        let fake = Fake::failing(fail);
+        let result = install(&fake, &release, &bundle);
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        (result, program_of(&bundle), left, fake)
+    }
+
+    #[test]
+    fn an_update_replaces_the_app_and_cleans_up() {
+        let (result, program, left, fake) = install_failing(Fail::Nothing);
+        result.unwrap();
+        assert_eq!(program, "new");
+        assert_eq!(left, ["Priogator.app"]);
+        assert!(fake.called("spctl"), "checked before installing");
+    }
+
+    #[test]
+    fn a_failed_download_or_mount_leaves_the_app_alone() {
+        for fail in [Fail::Download, Fail::Mount] {
+            let (result, program, left, fake) = install_failing(fail);
+            assert!(result.is_err());
+            assert_eq!(program, "old");
+            assert_eq!(left, ["Priogator.app"]);
+            assert!(!fake.called("ditto"));
+        }
+        let (result, ..) = install_failing(Fail::Download);
+        assert!(result.unwrap_err().starts_with("The download failed."));
+    }
+
+    #[test]
+    fn a_download_that_isnt_genuine_is_not_installed() {
+        for (fail, why) in [
+            (Fail::Damaged, "isn't intact"),
+            (Fail::OtherTeam, "isn't signed by Priogator's developer"),
+            (Fail::NotNotarized, "isn't notarized"),
+        ] {
+            let (result, program, left, fake) = install_failing(fail);
+            let error = result.unwrap_err();
+            assert!(error.contains(why), "{error}");
+            assert!(error.contains("nothing was changed"), "{error}");
+            assert_eq!(program, "old");
+            assert_eq!(left, ["Priogator.app"]);
+            assert!(!fake.called("ditto"), "nothing copied");
+            // The disk image is ejected again.
+            assert!(
+                fake.calls
+                    .lock()
+                    .unwrap()
+                    .ends_with(&["hdiutil".to_owned()])
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_copy_or_swap_keeps_the_old_app() {
+        for fail in [Fail::Copy, Fail::MoveOldAside, Fail::Swap] {
+            let (result, program, left, _) = install_failing(fail);
+            let error = result.unwrap_err();
+            assert!(error.contains("Couldn't write to"), "{error}");
+            assert!(error.contains("releases page"), "{error}");
+            assert_eq!(program, "old");
+            assert_eq!(left, ["Priogator.app"], "no half-done copies left");
+        }
+    }
+
+    #[test]
+    fn a_failed_rollback_says_where_the_old_app_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("Priogator.app");
+        make_app(&bundle, "old");
+        let fake = Fake::failing(Fail::SwapAndRollback);
+        let error = install(&fake, &parse_release(LATEST).unwrap(), &bundle).unwrap_err();
+        let old = dir.path().join(".Priogator-old.app");
+        assert!(error.contains(&old.display().to_string()), "{error}");
+        assert!(error.contains("Rename it to Priogator.app"), "{error}");
+        // Kept, complete, and nothing else left over.
+        assert_eq!(program_of(&old), "old");
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, [".Priogator-old.app"]);
+
+        // Trying again doesn't clear the old app away.
+        let again = install(
+            &Fake::failing(Fail::Nothing),
+            &parse_release(LATEST).unwrap(),
+            &bundle,
+        );
+        assert!(again.unwrap_err().contains("is missing"));
+        assert_eq!(program_of(&old), "old");
     }
 
     /// The sample answer with another version, for the duration of the tests.

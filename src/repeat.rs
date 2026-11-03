@@ -31,14 +31,17 @@ impl Unit {
         }
     }
 
+    /// `count` units; capped at what a date can span, so a damaged file
+    /// can't make it panic.
     fn span(self, count: u32) -> Span {
         let n = i64::from(count);
         match self {
-            Unit::Days => Span::new().days(n),
-            Unit::Weeks => Span::new().weeks(n),
-            Unit::Months => Span::new().months(n),
-            Unit::Years => Span::new().years(n),
+            Unit::Days => Span::new().try_days(n.min(7_304_484)),
+            Unit::Weeks => Span::new().try_weeks(n.min(1_043_497)),
+            Unit::Months => Span::new().try_months(n.min(239_976)),
+            Unit::Years => Span::new().try_years(n.min(19_998)),
         }
+        .unwrap_or_default()
     }
 }
 
@@ -61,21 +64,34 @@ impl Repeat {
     /// The next due date, after the occurrence due on `due` was done (or
     /// skipped) on `today`. A schedule moves on to its next date after today,
     /// so missed occurrences don't pile up.
+    #[cfg(test)]
     pub fn next(&self, due: Date, today: Date) -> Date {
+        self.next_on_day(due, today, due.day())
+    }
+
+    /// `next`, for a monthly or yearly series that is due on `day` of the
+    /// month: after Jan 31 → Feb 28 comes Mar 31, not Mar 28.
+    pub fn next_on_day(&self, due: Date, today: Date, day: i8) -> Date {
         match self {
             Repeat::AfterDone { every, unit } => today.saturating_add(unit.span((*every).max(1))),
             Repeat::Schedule { .. } => {
-                let mut date = self.step(due);
-                while date <= today {
-                    date = self.step(date);
+                let mut date = self.step(due, day);
+                // (Stops at the end of the calendar, where steps can't go on.)
+                while date <= today && date < Date::MAX {
+                    let next = self.step(date, day);
+                    if next <= date {
+                        break;
+                    }
+                    date = next;
                 }
                 date
             }
         }
     }
 
-    /// The scheduled date after `from`.
-    fn step(&self, from: Date) -> Date {
+    /// The scheduled date after `from`; months and years land on `day`, or
+    /// the month's last day if it is shorter.
+    fn step(&self, from: Date, day: i8) -> Date {
         let Repeat::Schedule {
             every,
             unit,
@@ -85,6 +101,14 @@ impl Repeat {
             return from;
         };
         let every = (*every).max(1);
+        if matches!(unit, Unit::Months | Unit::Years) {
+            let month = from.first_of_month().saturating_add(unit.span(every));
+            return month
+                .with()
+                .day(day.clamp(1, month.days_in_month()))
+                .build()
+                .unwrap_or(month);
+        }
         if *unit != Unit::Weeks || weekdays.is_empty() {
             return from.saturating_add(unit.span(every));
         }
@@ -92,7 +116,10 @@ impl Repeat {
         // Later in the same week?
         let mut d = from;
         while d.weekday() != Weekday::Sunday {
-            d = d.tomorrow().unwrap_or(d);
+            let Ok(next) = d.tomorrow() else {
+                return d;
+            };
+            d = next;
             if on(d) {
                 return d;
             }
@@ -457,5 +484,47 @@ mod tests {
             serde_json::from_str(r#"{"kind":"schedule","every":1,"unit":"days"}"#).unwrap();
         assert_eq!(plain, schedule(1, Unit::Days));
         assert!(serde_json::from_str::<Repeat>(r#"{"kind":"hourly","every":1}"#).is_err());
+    }
+
+    #[test]
+    fn a_month_end_series_stays_at_the_month_end() {
+        let monthly = schedule(1, Unit::Months);
+        let jan31 = date(2027, 1, 31);
+        let feb = monthly.next_on_day(jan31, jan31, 31);
+        assert_eq!(feb, date(2027, 2, 28));
+        let mar = monthly.next_on_day(feb, feb, 31);
+        assert_eq!(mar, date(2027, 3, 31), "not the 28th from now on");
+        assert_eq!(monthly.next_on_day(mar, mar, 31), date(2027, 4, 30));
+        // Missed ones too: done in mid-March, next is the end of March.
+        assert_eq!(
+            monthly.next_on_day(jan31, date(2027, 3, 15), 31),
+            date(2027, 3, 31)
+        );
+        let yearly = schedule(1, Unit::Years);
+        let leap = date(2028, 2, 29);
+        let mut day = leap;
+        for _ in 0..4 {
+            day = yearly.next_on_day(day, day, 29);
+        }
+        assert_eq!(day, date(2032, 2, 29), "back on the 29th in a leap year");
+    }
+
+    #[test]
+    fn the_end_of_the_calendar_neither_hangs_nor_panics() {
+        let last = Date::MAX;
+        let mondays = Repeat::Schedule {
+            every: 1,
+            unit: Unit::Weeks,
+            weekdays: vec![1],
+        };
+        // (Each would hang or panic without the limits.)
+        let _ = mondays.next(last, last);
+        let _ = schedule(1, Unit::Months).next(last, last);
+        let _ = schedule(100_000, Unit::Years).next(date(2026, 11, 2), date(2026, 11, 2));
+        let _ = Repeat::AfterDone {
+            every: u32::MAX,
+            unit: Unit::Days,
+        }
+        .next(last, last);
     }
 }

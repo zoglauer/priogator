@@ -14,12 +14,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use jiff::Span;
-use jiff::civil::Date;
+use jiff::civil::{Date, DateTime};
 
 use crate::board::Board;
 use crate::storage::write_board_file;
 
 const PREFIX: &str = "backup-";
+/// At most this many backups are deleted per day (see `Backups::prune`).
+const MAX_PRUNED: usize = 3;
 const SUFFIX: &str = ".json";
 
 pub struct BackupFile {
@@ -71,13 +73,10 @@ impl Backups {
     pub fn daily(&self, board: &Board, today: Date) -> io::Result<bool> {
         let written = !self.list().iter().any(|f| f.date == today);
         if written {
-            self.write(
-                board,
-                today,
-                &jiff::Zoned::now().strftime("%H%M%S").to_string(),
-            )?;
+            self.write(board, today.to_datetime(jiff::Zoned::now().time()))?;
         }
-        self.prune(today)?;
+        self.prune(today)
+            .map_err(|e| io::Error::new(e.kind(), format!("removing old backups: {e}")))?;
         Ok(written)
     }
 
@@ -87,25 +86,50 @@ impl Backups {
 
     /// A backup right now.
     pub fn now(&self, board: &Board) -> io::Result<PathBuf> {
-        let now = jiff::Zoned::now();
-        self.write(board, now.date(), &now.strftime("%H%M%S").to_string())
+        self.write(board, jiff::Zoned::now().datetime())
     }
 
-    /// `time` as `HHMMSS`.
-    fn write(&self, board: &Board, date: Date, time: &str) -> io::Result<PathBuf> {
-        let path = self.dir.join(format!("{PREFIX}{date}-{time}{SUFFIX}"));
+    /// Never replaces a backup: if one has this second's name already (two
+    /// backups within a second), the next free second is used.
+    fn write(&self, board: &Board, mut at: DateTime) -> io::Result<PathBuf> {
+        let path = loop {
+            let path = self.dir.join(format!(
+                "{PREFIX}{}{SUFFIX}",
+                at.strftime("%Y-%m-%d-%H%M%S")
+            ));
+            if !path.try_exists()? {
+                break path;
+            }
+            at = at
+                .checked_add(Span::new().seconds(1))
+                .map_err(io::Error::other)?;
+        };
         write_board_file(&path, board)?;
         Ok(path)
     }
 
-    /// Delete the backups the retention rules no longer keep.
+    /// Delete the backups the retention rules no longer keep, but at most
+    /// `MAX_PRUNED` at a time, the newest of them first. Day by day that is
+    /// all there is; after a long break it catches up over a few days. A
+    /// clock that is wrong for a while (set years ahead by hand, a flat
+    /// battery) can then only take a few backups, not the weekly and
+    /// monthly ones all at once.
     pub fn prune(&self, today: Date) -> io::Result<()> {
         let mut files = self.list();
         files.reverse(); // oldest first
         let dates: Vec<Date> = files.iter().map(|f| f.date).collect();
-        for (file, keep) in files.iter().zip(to_keep(&dates, today)) {
-            if !keep {
-                fs::remove_file(&file.path)?;
+        let mut doomed: Vec<&BackupFile> = files
+            .iter()
+            .zip(to_keep(&dates, today))
+            .filter(|(_, keep)| !keep)
+            .map(|(file, _)| file)
+            .collect();
+        doomed.reverse(); // newest first
+        for file in doomed.into_iter().take(MAX_PRUNED) {
+            // (Gone already, e.g. deleted by hand: fine.)
+            match fs::remove_file(&file.path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
             }
         }
         Ok(())
@@ -405,6 +429,48 @@ mod tests {
     }
 
     #[test]
+    fn backups_within_one_second_dont_replace_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let backups = Backups::new(dir.path());
+        let mut b = board();
+        let mut write_at = |at: DateTime, device: &str| {
+            b.device = device.to_owned();
+            let path = backups.write(&b, at).unwrap();
+            path.file_name().unwrap().to_string_lossy().into_owned()
+        };
+        let noon = date(2026, 10, 29).at(12, 0, 0, 0);
+        let names = [
+            write_at(noon, "a"),
+            write_at(noon, "b"),
+            write_at(noon, "c"),
+        ];
+        assert_eq!(
+            names,
+            [
+                "backup-2026-10-29-120000.json",
+                "backup-2026-10-29-120001.json",
+                "backup-2026-10-29-120002.json",
+            ]
+        );
+        // The last second of a day moves on into the next one.
+        let late = date(2026, 10, 29).at(23, 59, 59, 0);
+        assert_eq!(write_at(late, "d"), "backup-2026-10-29-235959.json");
+        assert_eq!(write_at(late, "e"), "backup-2026-10-30-000000.json");
+
+        // Each kept its own content.
+        let devices: Vec<String> = backups
+            .list()
+            .iter()
+            .map(|f| {
+                let file: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&f.path).unwrap()).unwrap();
+                file["device"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        assert_eq!(devices, ["e", "d", "c", "b", "a"]);
+    }
+
+    #[test]
     fn deleting_a_missing_backup_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let backups = Backups::new(dir.path());
@@ -442,5 +508,38 @@ mod tests {
         let path = backups.now(&b).unwrap();
         let back = crate::storage::read_board_file(&path, "mac").unwrap();
         assert!(back.tasks[&gone].meta.deleted);
+    }
+
+    #[test]
+    fn a_clock_years_ahead_takes_only_a_few_backups() {
+        let dir = tempfile::tempdir().unwrap();
+        let backups = Backups::new(dir.path());
+        let b = board();
+        let mut day = date(2026, 1, 1);
+        while day <= date(2026, 11, 2) {
+            backups.daily(&b, day).unwrap();
+            day = day.tomorrow().unwrap();
+        }
+        let before = backups.list().len();
+        // One start with the clock three years ahead.
+        backups.daily(&b, date(2029, 11, 2)).unwrap();
+        assert_eq!(backups.list().len(), before + 1 - MAX_PRUNED);
+        // Back to the right date: everything else is still there.
+        backups.daily(&b, date(2026, 11, 3)).unwrap();
+        assert!(
+            backups.list().len() >= before - MAX_PRUNED,
+            "{}",
+            backups.list().len()
+        );
+        let dates: Vec<Date> = backups.list().iter().map(|f| f.date).collect();
+        assert!(dates.contains(&date(2026, 1, 1)), "the oldest one stays");
+        assert!(
+            dates
+                .iter()
+                .filter(|d| d.year() == 2026 && d.month() < 9)
+                .count()
+                >= 8,
+            "the monthly ones stay: {dates:?}"
+        );
     }
 }

@@ -114,11 +114,13 @@ mod tests {
         assert_eq!(names.len(), groups.len(), "each license once");
     }
 
-    /// Every library in Cargo.lock that ships with the app must be listed;
-    /// run scripts/licenses.sh after changing dependencies.
+    /// Every library that ships with the app, on every platform it's built
+    /// for (as `about.toml`), must be listed; run scripts/licenses.sh after
+    /// changing dependencies. Asks cargo for the dependency graphs (offline,
+    /// from Cargo.lock).
     #[test]
     fn list_is_up_to_date() {
-        let listed: Vec<String> = third_party()
+        let listed: std::collections::HashSet<String> = third_party()
             .iter()
             .flat_map(|l| {
                 l.libraries
@@ -126,27 +128,47 @@ mod tests {
                     .map(|lib| format!("{} {}", lib.name, lib.version))
             })
             .collect();
-        for direct in [
-            "eframe",
-            "jiff",
-            "serde",
-            "uuid",
-            "rfd",
-            "fontique",
-            "directories",
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        for target in [
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
         ] {
-            let lock = include_str!("../Cargo.lock");
-            let version = lock
-                .split("[[package]]")
-                .find_map(|p| {
-                    p.contains(&format!("name = \"{direct}\"\n"))
-                        .then(|| p.split("version = \"").nth(1)?.split('"').next())
-                        .flatten()
-                })
-                .unwrap();
+            let output = std::process::Command::new(&cargo)
+                .args(["tree", "--edges", "normal", "--target", target])
+                .args([
+                    "--prefix",
+                    "none",
+                    "--format",
+                    "{p}",
+                    "--locked",
+                    "--offline",
+                ])
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .output()
+                .expect("cargo tree");
             assert!(
-                listed.contains(&format!("{direct} {version}")),
-                "{direct} {version} missing: run scripts/licenses.sh"
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let shipped: std::collections::BTreeSet<String> =
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    // "egui v0.37.0", "priogator v1.0.5 (/path)", "x v1.0 (*)"
+                    .filter_map(|line| {
+                        let mut parts = line.split_whitespace();
+                        let name = parts.next()?;
+                        let version = parts.next()?.strip_prefix('v')?;
+                        Some(format!("{name} {version}"))
+                    })
+                    .filter(|lib| !lib.starts_with("priogator "))
+                    .collect();
+            assert!(shipped.len() > 100, "{target}: {}", shipped.len());
+            let missing: Vec<&String> = shipped.iter().filter(|l| !listed.contains(*l)).collect();
+            assert!(
+                missing.is_empty(),
+                "{target}: {missing:?} missing: run scripts/licenses.sh"
             );
         }
     }

@@ -784,6 +784,41 @@ fn moving_a_filtered_group_away_clears_the_filter() {
 }
 
 #[test]
+fn a_group_moved_on_another_computer_clears_the_filter() {
+    let (dir, mut h) = app();
+    let work = area_id(&h, "Work");
+    let family = area_id(&h, "Family");
+    groups_menu(&mut h, 0);
+    h.get_by_label("● Admin").click();
+    h.run_steps(4);
+    assert!(!visible(&h, "Read team feedback"), "filtered");
+
+    // The laptop moves Admin (with its tasks) to Family.
+    let mut laptop = h.state().board.clone();
+    laptop.device = "laptop".into();
+    let admin = laptop
+        .groups_of(work)
+        .iter()
+        .find(|g| g.name == "Admin")
+        .unwrap()
+        .meta
+        .id;
+    laptop.move_group(admin, family);
+    SyncFolder::new(&dir.path().join("sync"), "laptop")
+        .save(&mut laptop)
+        .unwrap();
+    scan_now(&mut h);
+
+    assert_eq!(h.state().board.groups[&admin].area, family);
+    assert!(!h.state().filters.contains_key(&work));
+    assert!(visible(&h, "Read team feedback"), "Work shows all again");
+    assert!(
+        h.query(By::new().role(Role::Button).label("● Admin ▾"))
+            .is_none()
+    );
+}
+
+#[test]
 fn cancelling_the_group_dialog_changes_nothing() {
     let (_dir, mut h) = app();
     let before = h.state().board.groups.clone();
@@ -1112,7 +1147,6 @@ fn restoring_a_backup_brings_back_its_state_and_can_be_undone() {
     h.run_steps(4);
     assert!(visible(&h, "Added later"));
 
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     menu(&mut h, "Backups…");
     button(&h, "Restore…").click();
     h.run_steps(4);
@@ -1147,6 +1181,57 @@ fn cancelling_a_restore_changes_nothing() {
     button(&h, "Close").click();
     h.run_steps(4);
     assert!(visible(&h, "Added later"));
+    assert_eq!(backup_count(&h), 1);
+}
+
+#[test]
+fn a_failed_daily_backup_is_tried_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = demo_config(dir.path());
+    // The backup folder can't be created: a file is in the way.
+    std::fs::write(&config.backup_dir, "in the way").unwrap();
+    let mut h = harness(config, egui::Theme::Light);
+    h.run_steps(4);
+    assert_eq!(h.state().errors.len(), 1, "{:?}", h.state().errors);
+    assert!(h.state().errors[0].starts_with("Backup failed"));
+    scan_now(&mut h);
+    assert_eq!(h.state().errors.len(), 1, "said once, not at every try");
+
+    std::fs::remove_file(dir.path().join("backups")).unwrap();
+    scan_now(&mut h);
+    assert_eq!(backup_count(&h), 1, "made once the folder can be written");
+    scan_now(&mut h);
+    assert_eq!(backup_count(&h), 1, "and only once");
+}
+
+#[test]
+fn a_restore_needs_a_backup_of_the_current_state_first() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, mut h) = app();
+    let work = area_id(&h, "Work");
+    h.state_mut()
+        .board
+        .add_task(work, "Added later", None, None);
+    h.run_steps(4);
+    let backups = dir.path().join("backups");
+    let read_only =
+        |mode| std::fs::set_permissions(&backups, std::fs::Permissions::from_mode(mode)).unwrap();
+    read_only(0o555);
+    menu(&mut h, "Backups…");
+    button(&h, "Restore…").click();
+    h.run_steps(4);
+    button(&h, "Restore").click();
+    h.run_steps(4);
+    read_only(0o755);
+
+    let message = h.state().backups_dialog.as_ref().unwrap().message.clone();
+    assert!(
+        message
+            .as_deref()
+            .is_some_and(|m| m.starts_with("Can't back up the current state first")),
+        "{message:?}"
+    );
+    assert!(visible(&h, "Added later"), "nothing restored");
     assert_eq!(backup_count(&h), 1);
 }
 
@@ -1305,6 +1390,69 @@ fn scan_now(h: &mut Harness) {
     h.run_steps(4);
 }
 
+/// The laptop starts from what this computer has, changes it, and saves
+/// its own file into the sync folder.
+fn laptop_changes(
+    dir: &tempfile::TempDir,
+    h: &Harness,
+    change: impl FnOnce(&mut crate::board::Board),
+) {
+    let mut laptop = h.state().board.clone();
+    laptop.device = "laptop".into();
+    change(&mut laptop);
+    SyncFolder::new(&dir.path().join("sync"), "laptop")
+        .save(&mut laptop)
+        .unwrap();
+}
+
+#[test]
+fn changes_from_another_computer_clear_undo_and_redo() {
+    let (dir, mut h) = app();
+    add_area(&mut h, "One");
+    area_menu(&mut h, "House");
+    h.get_by_label("Edit area…").click();
+    h.run_steps(4);
+    h.get_by_role(Role::TextInput).focus();
+    h.run_steps(2);
+    type_into_focused(&mut h, "Home");
+    button(&h, "Save").click();
+    h.run_steps(4);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(4);
+    assert!(!h.state().undo.is_empty() && !h.state().redo.is_empty());
+
+    // A scan that finds nothing new keeps both.
+    scan_now(&mut h);
+    assert!(!h.state().undo.is_empty() && !h.state().redo.is_empty());
+
+    laptop_changes(&dir, &h, |b| {
+        b.add_area("From the laptop");
+    });
+    scan_now(&mut h);
+    assert!(area_names(&h).contains(&"From the laptop".to_owned()));
+    assert!(h.state().undo.is_empty());
+    assert!(h.state().redo.is_empty());
+}
+
+#[test]
+fn local_changes_not_saved_yet_survive_a_merge() {
+    let (dir, mut h) = app();
+    let work = area_id(&h, "Work");
+    let house = area_id(&h, "House");
+    laptop_changes(&dir, &h, |b| b.rename_area(house, "Home"));
+    // Renamed here, and the scan comes in the same frame as the save.
+    h.state_mut().board.rename_area(work, "Job");
+    h.state_mut().dirty = true;
+    h.state_mut().last_scan = Instant::now() - SCAN_INTERVAL;
+    h.run_steps(1);
+    let names = area_names(&h);
+    assert!(names.contains(&"Job".to_owned()), "{names:?}");
+    assert!(names.contains(&"Home".to_owned()), "{names:?}");
+    assert!(saved_areas(&dir).contains(&"Job".to_owned()));
+    scan_now(&mut h);
+    assert_eq!(area_names(&h), names, "and stay");
+}
+
 #[test]
 fn tasks_from_another_computer_appear() {
     let (dir, mut h) = app();
@@ -1315,7 +1463,7 @@ fn tasks_from_another_computer_appear() {
     let work = laptop.areas_sorted()[0].meta.id;
     laptop.add_task(work, "Written on the laptop", None, None);
     let mut folder = SyncFolder::new(&sync, "laptop");
-    folder.save(&laptop).unwrap();
+    folder.save(&mut laptop).unwrap();
 
     scan_now(&mut h);
     assert!(visible(&h, "Written on the laptop"));
@@ -1345,6 +1493,306 @@ fn changes_are_saved_to_this_computers_file() {
     )
     .unwrap();
     assert!(own.areas.values().any(|a| a.name == "Saved area"));
+}
+
+fn set_mode(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// Add an area through the toolbar, as a change that needs saving.
+fn add_area(h: &mut Harness, name: &str) {
+    button(h, "+ Area").click();
+    h.run_steps(4);
+    h.event(egui::Event::Text(name.into()));
+    h.run_steps(1);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(4);
+}
+
+fn own_file(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    dir.path().join("sync").join("device-preview.json")
+}
+
+fn saved_areas(dir: &tempfile::TempDir) -> Vec<String> {
+    let own = crate::storage::read_board_file(&own_file(dir), "preview").unwrap();
+    own.areas.values().map(|a| a.name.clone()).collect()
+}
+
+#[test]
+fn a_failed_save_keeps_the_changes_and_saves_them_once_it_can() {
+    let (dir, mut h) = app();
+    let before = std::fs::read(own_file(&dir)).unwrap();
+    let sync = dir.path().join("sync");
+    set_mode(&sync, 0o555);
+    add_area(&mut h, "Unsaved area");
+    h.run_steps(4);
+    let still = std::fs::read(own_file(&dir)).unwrap();
+    set_mode(&sync, 0o755);
+
+    assert_eq!(still, before, "the file is left as it was");
+    assert!(h.state().dirty, "the change is still to be saved");
+    assert!(area_names(&h).contains(&"Unsaved area".to_owned()));
+    let errors = &h.state().errors;
+    assert_eq!(errors.len(), 1, "one problem, not one per try: {errors:?}");
+    assert!(errors[0].starts_with(SAVING_FAILED));
+
+    // Writable again: the next try saves and the problem goes away.
+    h.run_steps(2);
+    assert!(!h.state().dirty);
+    assert!(h.state().errors.is_empty());
+    assert!(saved_areas(&dir).contains(&"Unsaved area".to_owned()));
+}
+
+#[test]
+fn unsaved_changes_are_saved_when_the_app_quits() {
+    let (dir, mut h) = app();
+    let work = area_id(&h, "Work");
+    // A change the app hasn't had a frame to save yet.
+    h.state_mut().board.rename_area(work, "Job");
+    h.state_mut().dirty = true;
+    h.state_mut().save_on_exit();
+    assert!(saved_areas(&dir).contains(&"Job".to_owned()));
+}
+
+/// The app started with its own file damaged.
+fn app_with_damaged_file(sync_writable: bool) -> (tempfile::TempDir, Harness) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = demo_config(dir.path());
+    std::fs::write(own_file(&dir), "{ damaged").unwrap();
+    if !sync_writable {
+        set_mode(&config.sync_dir, 0o555);
+    }
+    let mut h = harness(config, egui::Theme::Light);
+    h.run_steps(4);
+    (dir, h)
+}
+
+fn copies_of_damaged(dir: &tempfile::TempDir) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir.path().join("sync"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("damaged-")
+        })
+        .collect()
+}
+
+fn damage_message(h: &Harness) -> String {
+    h.state()
+        .folder
+        .not_saving()
+        .expect("saving waits for the user")
+        .message
+        .clone()
+}
+
+#[test]
+fn a_second_window_with_the_same_settings_doesnt_overwrite_the_first() {
+    let (dir, mut first) = app();
+    let mut second = harness(
+        Config {
+            file: None,
+            ..first.state().config.clone()
+        },
+        egui::Theme::Light,
+    );
+    second.run_steps(4);
+    assert!(first.query_by_label("⚠ Not saved").is_none());
+    assert!(second.query_by_label("⚠ Not saved").is_some());
+
+    add_area(&mut first, "From the first");
+    add_area(&mut second, "From the second");
+    // Clicking the warning doesn't make it save.
+    second.get_by_label("⚠ Not saved").click();
+    second.run_steps(4);
+    assert!(second.state().dirty);
+    assert!(saved_areas(&dir).contains(&"From the first".to_owned()));
+    assert!(!saved_areas(&dir).contains(&"From the second".to_owned()));
+
+    // The first window closes: the second takes over without losing either.
+    first.state_mut().save_on_exit();
+    drop(first);
+    scan_now(&mut second);
+    second.run_steps(2);
+    let saved = saved_areas(&dir);
+    assert!(saved.contains(&"From the first".to_owned()), "{saved:?}");
+    assert!(saved.contains(&"From the second".to_owned()), "{saved:?}");
+    assert!(second.query_by_label("⚠ Not saved").is_none());
+}
+
+#[test]
+fn a_sync_folder_that_cant_be_listed_shows_not_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = demo_config(dir.path());
+    let sync = config.sync_dir.clone();
+    set_mode(&sync, 0o300);
+    let mut h = harness(config, egui::Theme::Light);
+    h.run_steps(4);
+    add_area(&mut h, "New area");
+    h.run_steps(2);
+    let warned = h.query_by_label("⚠ Not saved").is_some();
+    let message = damage_message(&h);
+    set_mode(&sync, 0o755);
+    assert!(warned);
+    assert!(message.contains("can't be read"), "{message}");
+    assert!(!saved_areas(&dir).contains(&"New area".to_owned()));
+    assert!(
+        saved_areas(&dir).contains(&"Work".to_owned()),
+        "file intact"
+    );
+    assert_eq!(backup_count(&h), 0, "no backup of the empty board");
+
+    // Readable again: the tasks appear, and the new area is saved with them.
+    scan_now(&mut h);
+    h.run_steps(2);
+    assert!(visible(&h, "Send quarterly report"));
+    let saved = saved_areas(&dir);
+    assert!(saved.contains(&"New area".to_owned()), "{saved:?}");
+    assert!(h.query_by_label("⚠ Not saved").is_none());
+    assert_eq!(backup_count(&h), 1, "made once everything is read");
+}
+
+#[test]
+fn a_file_damaged_while_running_is_not_overwritten_by_the_next_save() {
+    let (dir, mut h) = app();
+    std::fs::write(own_file(&dir), "{ cut short").unwrap();
+    // A change right away: saved before the next scan would notice.
+    add_area(&mut h, "New area");
+    h.run_steps(4);
+    assert_eq!(
+        std::fs::read_to_string(own_file(&dir)).unwrap(),
+        "{ cut short"
+    );
+    assert!(damage_message(&h).contains("A copy is kept"));
+    assert_eq!(copies_of_damaged(&dir).len(), 1);
+    assert!(h.state().dirty, "the change waits");
+    assert!(h.query_by_label("⚠ Not saved").is_some());
+}
+
+#[test]
+fn dismissing_other_problems_doesnt_allow_overwriting_a_damaged_file() {
+    let (dir, mut h) = app_with_damaged_file(true);
+    add_area(&mut h, "New area");
+    // Another computer's broken file brings a problem of its own.
+    std::fs::write(dir.path().join("sync").join("device-pc.json"), "{ nope").unwrap();
+    scan_now(&mut h);
+    assert_eq!(h.state().errors.len(), 1, "{:?}", h.state().errors);
+    assert!(h.query_by_label("⚠ Not saved").is_some(), "still warned");
+
+    h.get_by_label("⚠ 1 problem").click();
+    h.run_steps(4);
+    assert!(h.state().errors.is_empty());
+    assert!(h.query_by_label("⚠ Not saved").is_some());
+    assert_eq!(
+        std::fs::read_to_string(own_file(&dir)).unwrap(),
+        "{ damaged"
+    );
+    assert!(h.state().dirty);
+}
+
+#[test]
+fn a_damaged_own_file_waits_for_the_user_before_saving() {
+    let (dir, mut h) = app_with_damaged_file(true);
+    assert!(h.state().errors.is_empty(), "{:?}", h.state().errors);
+    assert!(damage_message(&h).contains("A copy is kept"));
+    assert!(h.query_by_label("⚠ Not saved").is_some());
+    let copies = copies_of_damaged(&dir);
+    assert_eq!(copies.len(), 1);
+
+    add_area(&mut h, "New area");
+    h.run_steps(4);
+    assert_eq!(
+        std::fs::read_to_string(own_file(&dir)).unwrap(),
+        "{ damaged"
+    );
+    assert!(h.state().dirty);
+    h.state_mut().save_on_exit();
+    assert_eq!(
+        std::fs::read_to_string(own_file(&dir)).unwrap(),
+        "{ damaged",
+        "not on quitting either"
+    );
+
+    // The warning offers a backup, or to carry on: then it saves; the copy stays.
+    h.get_by_label("⚠ Not saved").click();
+    h.run_steps(4);
+    assert!(
+        h.query_by_label("This computer's file is damaged")
+            .is_some()
+    );
+    button(&h, "Continue without it").click();
+    h.run_steps(4);
+    assert!(h.query_by_label("⚠ Not saved").is_none());
+    assert!(!h.state().dirty);
+    assert!(saved_areas(&dir).contains(&"New area".to_owned()));
+    assert_eq!(copies_of_damaged(&dir), copies);
+    assert_eq!(std::fs::read_to_string(&copies[0]).unwrap(), "{ damaged");
+}
+
+#[test]
+fn quitting_while_saving_waits_keeps_the_changes_in_a_backup() {
+    let (dir, mut h) = app_with_damaged_file(true);
+    add_area(&mut h, "Unsaved area");
+    h.run_steps(2);
+    let before = backup_count(&h);
+    h.state_mut().save_on_exit();
+    assert_eq!(
+        std::fs::read_to_string(own_file(&dir)).unwrap(),
+        "{ damaged"
+    );
+    let backups = h.state().backups.list();
+    assert_eq!(backups.len(), before + 1, "a rescue backup");
+    let rescued = crate::storage::read_board_file(&backups[0].path, "preview").unwrap();
+    assert!(rescued.areas.values().any(|a| a.name == "Unsaved area"));
+}
+
+#[test]
+fn a_damaged_own_file_is_replaced_by_restoring_a_backup() {
+    let (dir, mut h) = app_with_damaged_file(true);
+    // A backup from before the damage.
+    let backups = crate::backup::Backups::new(&dir.path().join("backups"));
+    let mut good = crate::board::Board::new("preview");
+    good.add_default_areas();
+    let work = good.areas_sorted()[0].meta.id;
+    good.add_task(work, "From the backup", None, None);
+    backups.now(&good).unwrap();
+
+    h.get_by_label("⚠ Not saved").click();
+    h.run_steps(4);
+    button(&h, "Restore a backup…").click();
+    h.run_steps(4);
+    assert!(h.state().backups_dialog.is_some());
+    h.get_all(By::new().role(Role::Button).label("Restore…"))
+        .next()
+        .unwrap()
+        .click();
+    h.run_steps(4);
+    button(&h, "Restore").click();
+    h.run_steps(4);
+
+    assert!(visible(&h, "From the backup"));
+    assert!(h.query_by_label("⚠ Not saved").is_none());
+    let own = crate::storage::read_board_file(&own_file(&dir), "preview").unwrap();
+    assert!(own.tasks.values().any(|t| t.title == "From the backup"));
+}
+
+#[test]
+fn a_damaged_own_file_that_cant_be_copied_isnt_overwritten() {
+    let (dir, mut h) = app_with_damaged_file(false);
+    add_area(&mut h, "New area");
+    h.run_steps(4);
+    set_mode(&dir.path().join("sync"), 0o755);
+    assert!(damage_message(&h).contains("nor could it be copied"));
+    assert!(copies_of_damaged(&dir).is_empty());
+    assert_eq!(
+        std::fs::read_to_string(own_file(&dir)).unwrap(),
+        "{ damaged"
+    );
+    assert!(h.state().dirty, "the change waits");
 }
 
 #[test]
@@ -1510,6 +1958,30 @@ fn wait_for_update_check(h: &mut Harness) {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     panic!("the update check didn't finish");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn shortcuts_wait_while_the_update_dialog_is_open() {
+    let (_dir, mut h) = app();
+    add_area(&mut h, "Something to undo");
+    assert!(!h.state().undo.is_empty());
+    let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+    h.state_mut().updater = crate::update::Updater::with_fetch(release_answer(&current));
+    menu(&mut h, "Check for Updates…");
+    wait_for_update_check(&mut h);
+    let before = h.state().board.clone();
+    for (modifiers, key) in [
+        (egui::Modifiers::COMMAND, egui::Key::N),
+        (egui::Modifiers::COMMAND, egui::Key::Comma),
+        (egui::Modifiers::COMMAND, egui::Key::Z),
+    ] {
+        h.key_press_modifiers(modifiers, key);
+        h.run_steps(2);
+    }
+    assert!(h.state().task_editor.is_none());
+    assert!(!h.state().settings_open);
+    assert!(h.state().board == before);
 }
 
 #[cfg(target_os = "macos")]

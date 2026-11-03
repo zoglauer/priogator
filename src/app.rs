@@ -12,7 +12,7 @@ use crate::backup::{BackupFile, Backups};
 use crate::board::{Board, TASK_COLORS, TaskDetails};
 use crate::model::{Subtask, TaskItem};
 use crate::repeat::{Repeat, Unit, WEEKDAY_BUTTONS};
-use crate::storage::{ColorScheme, Config, SyncFolder, read_board_file};
+use crate::storage::{ColorScheme, Config, SyncFolder, Waiting, read_board_file};
 
 pub const DEFAULT_COLUMN_WIDTH: f32 = 280.0;
 const COLUMN_WIDTHS: std::ops::RangeInclusive<f32> = 200.0..=600.0;
@@ -26,6 +26,8 @@ const DRAG_GHOST_WIDTH: f32 = 240.0;
 const GROUP_BAR_HEIGHT: f32 = 34.0;
 /// How often the sync folder is checked for changes from other devices.
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
+/// Start of the problem shown while this computer's file can't be written.
+const SAVING_FAILED: &str = "Saving failed: ";
 const UNDO_LIMIT: usize = 100;
 
 const OVERDUE: Color32 = Color32::from_rgb(220, 70, 60);
@@ -156,6 +158,8 @@ pub struct PriogatorApp {
     folder: SyncFolder,
     /// Local changes not yet written to disk.
     dirty: bool,
+    /// Settings changed in the dialog and not yet saved.
+    config_dirty: bool,
     errors: Vec<String>,
     last_scan: Instant,
     selected: Option<Uuid>,
@@ -177,6 +181,8 @@ pub struct PriogatorApp {
     area_editor: Option<AreaEditor>,
     /// Column waiting for delete confirmation.
     confirm_delete_area: Option<Uuid>,
+    /// What to do about this computer's damaged file (from "⚠ Not saved").
+    damage_dialog: bool,
     config: Config,
     backups: Backups,
     /// Day of the last daily backup check.
@@ -190,6 +196,9 @@ pub struct PriogatorApp {
     updater: crate::update::Updater,
     #[cfg(target_os = "macos")]
     update_dialog: bool,
+    /// The restart after an update was set going (once is enough).
+    #[cfg(target_os = "macos")]
+    relaunching: bool,
 }
 
 /// Back on the left, Close on the right.
@@ -422,6 +431,7 @@ impl PriogatorApp {
             board,
             folder,
             dirty: false,
+            config_dirty: false,
             errors,
             last_scan: Instant::now(),
             selected: None,
@@ -433,6 +443,7 @@ impl PriogatorApp {
             group_editor: None,
             area_editor: None,
             confirm_delete_area: None,
+            damage_dialog: false,
             config,
             backups,
             last_backup: None,
@@ -445,6 +456,8 @@ impl PriogatorApp {
             updater: crate::update::Updater::new(),
             #[cfg(target_os = "macos")]
             update_dialog: false,
+            #[cfg(target_os = "macos")]
+            relaunching: false,
             undo: Vec::new(),
             redo: Vec::new(),
             history_request: None,
@@ -457,34 +470,61 @@ impl PriogatorApp {
     /// date changes while running).
     fn daily_backup(&mut self) {
         let today = today();
-        if self.last_backup == Some(today) {
+        // Not while saving waits either: what's shown may be incomplete
+        // (e.g. an empty board while the sync folder can't be read).
+        if self.last_backup == Some(today) || self.folder.not_saving().is_some() {
             return;
         }
-        self.last_backup = Some(today);
-        if let Err(e) = self.backups.daily(&self.board, today) {
-            self.errors.push(format!("Backup failed: {e}"));
+        match self.backups.daily(&self.board, today) {
+            Ok(_) => self.last_backup = Some(today),
+            // Tried again at the next scan (e.g. once a backup drive is back).
+            Err(e) => {
+                let error = format!("Backup failed: {e}");
+                if !self.errors.contains(&error) {
+                    self.errors.push(error);
+                }
+            }
         }
     }
 
     fn sync(&mut self) {
-        if self.dirty {
-            match self.folder.save(&self.board) {
-                Ok(()) => self.dirty = false,
-                Err(e) => self.errors = vec![format!("Saving failed: {e}")],
+        // (Not while saving waits: the "Not saved" warning says why.)
+        if self.dirty && self.folder.not_saving().is_none() {
+            // Tried again every frame until it works; the changes stay meanwhile.
+            match self.folder.save(&mut self.board) {
+                Ok(merged) => {
+                    self.dirty = false;
+                    self.errors.retain(|e| !e.starts_with(SAVING_FAILED));
+                    if merged {
+                        // Changed outside this app since: undo would revert that too.
+                        self.undo.clear();
+                        self.redo.clear();
+                    }
+                }
+                // (It turned out it has to wait: the warning says why.)
+                Err(_) if self.folder.not_saving().is_some() => {}
+                Err(e) => {
+                    self.errors.retain(|e| !e.starts_with(SAVING_FAILED));
+                    self.errors.push(format!("{SAVING_FAILED}{e}"));
+                }
             }
         }
         if self.last_scan.elapsed() >= SCAN_INTERVAL {
             self.last_scan = Instant::now();
-            self.daily_backup();
             let (changed, errors) = self.folder.reload_if_changed(&mut self.board);
             if changed {
                 // Undoing past changes from the other device would revert them too.
                 self.undo.clear();
                 self.redo.clear();
+                let board = &self.board;
+                self.filters
+                    .retain(|area, g| board.group(*g).is_some_and(|g| g.area == *area));
             }
             if !errors.is_empty() {
                 self.errors = errors;
             }
+            // After the scan, so it has what came in.
+            self.daily_backup();
         }
     }
 
@@ -511,15 +551,34 @@ impl PriogatorApp {
         }
     }
 
+    /// Folded by hand, or outside its active hours (unless opened for now).
+    fn is_folded(&self, area: &crate::model::Area, now: jiff::civil::DateTime) -> bool {
+        self.config.folded_areas.contains(&area.meta.id)
+            || area.active.as_ref().is_some_and(|a| !a.is_active(now))
+                && !self.unfolded.contains(&area.meta.id)
+    }
+
     fn editing(&self) -> bool {
         self.task_editor.is_some()
             || self.group_editor.is_some()
             || self.area_editor.is_some()
             || self.confirm_delete_area.is_some()
+            || self.damage_dialog
             || self.backups_dialog.is_some()
             || self.about_open
             || self.settings_open
             || self.shortcuts_open
+            || self.update_dialog_open()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn update_dialog_open(&self) -> bool {
+        self.update_dialog
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn update_dialog_open(&self) -> bool {
+        false
     }
 
     fn open_task_editor(&mut self, id: Uuid) {
@@ -537,9 +596,18 @@ impl PriogatorApp {
         });
     }
 
+    /// The group `area` is filtered by, if it still exists and is still in
+    /// that area (another device may have moved or deleted it).
+    fn filter(&self, area: Uuid) -> Option<Uuid> {
+        self.filters
+            .get(&area)
+            .copied()
+            .filter(|g| self.board.group(*g).is_some_and(|g| g.area == area))
+    }
+
     /// The task dialog for a new task in `area`.
     fn open_new_task(&mut self, area: Uuid) {
-        let group = self.filters.get(&area).copied();
+        let group = self.filter(area);
         self.task_editor = Some(TaskEditor {
             id: None,
             details: TaskDetails {
@@ -706,7 +774,19 @@ impl PriogatorApp {
         let Some(id) = self.selected else {
             return;
         };
-        let Some(task) = self.board.tasks.get(&id).filter(|t| !t.meta.deleted) else {
+        // Gone, or out of sight (its area folded, a filter hides it): keys
+        // mustn't act on a task nobody can see.
+        let now = jiff::Zoned::now().datetime();
+        let visible = |t: &&TaskItem| {
+            !t.meta.deleted
+                && self
+                    .board
+                    .areas
+                    .get(&t.area)
+                    .is_some_and(|a| !self.is_folded(a, now))
+                && self.filter(t.area).is_none_or(|g| t.group == Some(g))
+        };
+        let Some(task) = self.board.tasks.get(&id).filter(visible) else {
             self.selected = None;
             return;
         };
@@ -825,6 +905,28 @@ impl PriogatorApp {
                 }
                 if self.history_request.is_some() {
                     ui.ctx().request_repaint();
+                }
+                // Separate from the problems below, so that dismissing those
+                // never lets anything be overwritten.
+                if let Some(why) = self.folder.not_saving() {
+                    ui.add_space(8.0);
+                    let warning = RichText::new("⚠ Not saved").color(OVERDUE).strong();
+                    let response = ui
+                        .add(egui::Button::new(warning).frame(false))
+                        .on_hover_text(match why.kind {
+                            Waiting::Damaged => format!("{}\n\nClick for what to do.", why.message),
+                            Waiting::NewerFormat => {
+                                format!("{}\n\nClick to check for updates.", why.message)
+                            }
+                            Waiting::Other => why.message.clone(),
+                        });
+                    if response.clicked() {
+                        match why.kind {
+                            Waiting::Damaged => self.damage_dialog = true,
+                            Waiting::NewerFormat => self.offer_update(ui.ctx()),
+                            Waiting::Other => {}
+                        }
+                    }
                 }
                 if !self.errors.is_empty() {
                     ui.add_space(8.0);
@@ -950,10 +1052,7 @@ impl PriogatorApp {
                 ui.horizontal_top(|ui| {
                     let now = jiff::Zoned::now().datetime();
                     for area in self.board.areas_sorted() {
-                        let folded = self.config.folded_areas.contains(&area.meta.id)
-                            || area.active.as_ref().is_some_and(|a| !a.is_active(now))
-                                && !self.unfolded.contains(&area.meta.id);
-                        if folded {
+                        if self.is_folded(area, now) {
                             self.folded_area(ui, area, pass);
                             continue;
                         }
@@ -1133,11 +1232,7 @@ impl PriogatorApp {
     }
 
     fn column(&self, ui: &mut egui::Ui, area: Uuid, name: &str, today: Date, pass: &mut Pass) {
-        let filter = self
-            .filters
-            .get(&area)
-            .copied()
-            .filter(|g| self.board.group(*g).is_some());
+        let filter = self.filter(area);
         let shown = |t: &&TaskItem| filter.is_none_or(|g| t.group == Some(g));
         let deadlines: Vec<_> = self
             .board
@@ -1816,132 +1911,141 @@ impl PriogatorApp {
                 }
             });
             ui.add_space(6.0);
-            let title = ui.add(
-                egui::TextEdit::singleline(&mut editor.details.title)
-                    .hint_text("What needs to be done?")
-                    .font(egui::FontId::proportional(15.0))
-                    .margin(egui::vec2(8.0, 6.0))
-                    .desired_width(f32::INFINITY),
-            );
-            if std::mem::take(&mut editor.focus_title) {
-                title.request_focus();
-            }
-            if title.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                save = true;
-            }
-            ui.add_space(10.0);
-
-            // The task's properties as a form: labels on the left, right-aligned.
-            let label = |ui: &mut egui::Ui, text: &str| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(text).weak());
-                });
-            };
-            egui::Grid::new("task_form")
-                .num_columns(2)
-                .spacing([12.0, 10.0])
-                .min_col_width(60.0)
+            // A long checklist scrolls; the buttons below stay in the window.
+            let max_height = (ui.ctx().content_rect().height() - 160.0).max(200.0);
+            egui::ScrollArea::vertical()
+                .max_height(max_height)
+                .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    label(ui, "Area");
-                    ui.horizontal(|ui| {
-                        let mut area = Some(editor.details.area);
-                        area_combo(
-                            ui,
-                            "edit_area",
-                            &areas,
-                            &mut area,
-                            &mut editor.details.group,
-                        );
-                        if let Some(area) = area {
-                            editor.details.area = area;
-                        }
-                        if !self.board.groups_of(editor.details.area).is_empty() {
-                            ui.add_space(8.0);
-                            ui.label(RichText::new("Group").weak());
-                            group_combo(
-                                ui,
-                                "edit_group",
-                                &self.board,
-                                editor.details.area,
-                                &mut editor.details.group,
-                            );
-                        }
-                    });
-                    ui.end_row();
-
-                    label(ui, "Deadline");
-                    ui.horizontal(|ui| {
-                        if ui.checkbox(&mut editor.has_deadline, "").changed()
-                            && !editor.has_deadline
-                        {
-                            // A repeating task needs its date.
-                            editor.details.repeat = None;
-                        }
-                        if editor.has_deadline {
-                            ui.add(
-                                egui_extras::DatePickerButton::new(&mut editor.deadline)
-                                    .id_salt("edit_deadline"),
-                            );
-                            ui.add_space(8.0);
-                            ui.label(RichText::new("on top").weak());
-                            ui.add(egui::DragValue::new(&mut editor.lead_days).range(0..=365))
-                                .on_hover_text(
-                                    "How long before its deadline the task moves to the top \
-                                     of its area",
-                                );
-                            ui.label(
-                                RichText::new(if editor.lead_days == 1 {
-                                    "day before"
-                                } else {
-                                    "days before"
-                                })
-                                .weak(),
-                            );
-                        } else {
-                            ui.label(RichText::new("None").weak());
-                        }
-                    });
-                    ui.end_row();
-
-                    label(ui, "Repeat");
-                    if repeat_kind(ui, &mut editor.details.repeat, editor.deadline)
-                        && !editor.has_deadline
-                    {
-                        // Repeating needs a first due date.
-                        editor.has_deadline = true;
-                    }
-                    ui.end_row();
-                    if editor.details.repeat.is_some() {
-                        ui.label("");
-                        ui.vertical(|ui| repeat_details(ui, &mut editor.details.repeat));
-                        ui.end_row();
-                    }
-
-                    label(ui, "Pin");
-                    ui.checkbox(
-                        &mut editor.details.pinned,
-                        "Keep on top, whatever the deadline",
+                    let title = ui.add(
+                        egui::TextEdit::singleline(&mut editor.details.title)
+                            .hint_text("What needs to be done?")
+                            .font(egui::FontId::proportional(15.0))
+                            .margin(egui::vec2(8.0, 6.0))
+                            .desired_width(f32::INFINITY),
                     );
-                    ui.end_row();
+                    if std::mem::take(&mut editor.focus_title) {
+                        title.request_focus();
+                    }
+                    if title.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        save = true;
+                    }
+                    ui.add_space(10.0);
 
-                    label(ui, "Color");
-                    color_choice(ui, &mut editor.details.color, true);
-                    ui.end_row();
+                    // The task's properties as a form: labels on the left, right-aligned.
+                    let label = |ui: &mut egui::Ui, text: &str| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(text).weak());
+                        });
+                    };
+                    egui::Grid::new("task_form")
+                        .num_columns(2)
+                        .spacing([12.0, 10.0])
+                        .min_col_width(60.0)
+                        .show(ui, |ui| {
+                            label(ui, "Area");
+                            ui.horizontal(|ui| {
+                                let mut area = Some(editor.details.area);
+                                area_combo(
+                                    ui,
+                                    "edit_area",
+                                    &areas,
+                                    &mut area,
+                                    &mut editor.details.group,
+                                );
+                                if let Some(area) = area {
+                                    editor.details.area = area;
+                                }
+                                if !self.board.groups_of(editor.details.area).is_empty() {
+                                    ui.add_space(8.0);
+                                    ui.label(RichText::new("Group").weak());
+                                    group_combo(
+                                        ui,
+                                        "edit_group",
+                                        &self.board,
+                                        editor.details.area,
+                                        &mut editor.details.group,
+                                    );
+                                }
+                            });
+                            ui.end_row();
+
+                            label(ui, "Deadline");
+                            ui.horizontal(|ui| {
+                                if ui.checkbox(&mut editor.has_deadline, "").changed()
+                                    && !editor.has_deadline
+                                {
+                                    // A repeating task needs its date.
+                                    editor.details.repeat = None;
+                                }
+                                if editor.has_deadline {
+                                    ui.add(
+                                        egui_extras::DatePickerButton::new(&mut editor.deadline)
+                                            .id_salt("edit_deadline"),
+                                    );
+                                    ui.add_space(8.0);
+                                    ui.label(RichText::new("on top").weak());
+                                    ui.add(
+                                        egui::DragValue::new(&mut editor.lead_days).range(0..=365),
+                                    )
+                                    .on_hover_text(
+                                        "How long before its deadline the task moves to the top \
+                                             of its area",
+                                    );
+                                    ui.label(
+                                        RichText::new(if editor.lead_days == 1 {
+                                            "day before"
+                                        } else {
+                                            "days before"
+                                        })
+                                        .weak(),
+                                    );
+                                } else {
+                                    ui.label(RichText::new("None").weak());
+                                }
+                            });
+                            ui.end_row();
+
+                            label(ui, "Repeat");
+                            if repeat_kind(ui, &mut editor.details.repeat, editor.deadline)
+                                && !editor.has_deadline
+                            {
+                                // Repeating needs a first due date.
+                                editor.has_deadline = true;
+                            }
+                            ui.end_row();
+                            if editor.details.repeat.is_some() {
+                                ui.label("");
+                                ui.vertical(|ui| repeat_details(ui, &mut editor.details.repeat));
+                                ui.end_row();
+                            }
+
+                            label(ui, "Pin");
+                            ui.checkbox(
+                                &mut editor.details.pinned,
+                                "Keep on top, whatever the deadline",
+                            );
+                            ui.end_row();
+
+                            label(ui, "Color");
+                            color_choice(ui, &mut editor.details.color, true);
+                            ui.end_row();
+                        });
+
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("NOTES").small().weak());
+                    ui.add(
+                        egui::TextEdit::multiline(&mut editor.details.notes)
+                            .hint_text("Add note")
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("SUBTASKS").small().weak());
+                    subtask_editor(ui, &mut editor.details.subtasks, &mut editor.new_subtask);
                 });
-
-            ui.add_space(6.0);
-            ui.separator();
-            ui.add_space(4.0);
-            ui.label(RichText::new("NOTES").small().weak());
-            ui.add(
-                egui::TextEdit::multiline(&mut editor.details.notes)
-                    .hint_text("Add note")
-                    .desired_rows(3)
-                    .desired_width(f32::INFINITY),
-            );
-            ui.add_space(8.0);
-            ui.label(RichText::new("SUBTASKS").small().weak());
-            subtask_editor(ui, &mut editor.details.subtasks, &mut editor.new_subtask);
 
             ui.add_space(12.0);
             // One row high, buttons on the right.
@@ -2102,6 +2206,79 @@ impl PriogatorApp {
         }
     }
 
+    /// A newer Priogator wrote a sync file: get this one updated.
+    fn offer_update(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "macos")]
+        {
+            self.updater.check(ctx);
+            self.update_dialog = true;
+        }
+        #[cfg(not(target_os = "macos"))]
+        ctx.open_url(egui::OpenUrl::new_tab(
+            "https://github.com/zoglauer/priogator/releases",
+        ));
+    }
+
+    /// This computer's file is damaged and isn't read: restore a backup
+    /// (the usual way out), or carry on without it, replacing it on the
+    /// next save (a copy was kept).
+    fn damage_dialog(&mut self, ctx: &egui::Context) {
+        if !self.damage_dialog {
+            return;
+        }
+        let Some(why) = self
+            .folder
+            .not_saving()
+            .filter(|w| w.kind == Waiting::Damaged)
+        else {
+            self.damage_dialog = false;
+            return;
+        };
+        let mut backups = false;
+        let mut carry_on = false;
+        let mut close = false;
+        let modal = egui::Modal::new(egui::Id::unique("damage_dialog")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.heading("This computer's file is damaged");
+            ui.add_space(4.0);
+            ui.label(&why.message);
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(
+                    "Restoring a backup brings back your tasks as they were then. \
+                     Continuing without it saves what is shown now over the damaged file.",
+                )
+                .weak(),
+            );
+            ui.add_space(8.0);
+            let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+            ui.allocate_ui_with_layout(
+                row,
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if ui.button("Restore a backup…").clicked() {
+                        backups = true;
+                    }
+                    if ui.button("Continue without it").clicked() {
+                        carry_on = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                },
+            );
+        });
+        if backups {
+            self.damage_dialog = false;
+            self.backups_dialog = Some(self.load_backups_dialog());
+        } else if carry_on {
+            self.damage_dialog = false;
+            self.folder.save_anyway();
+        } else if close || modal.should_close() {
+            self.damage_dialog = false;
+        }
+    }
+
     fn confirm_delete_area(&mut self, ctx: &egui::Context) {
         let Some(id) = self.confirm_delete_area else {
             return;
@@ -2191,6 +2368,8 @@ impl PriogatorApp {
             .now(&self.board)
             .map_err(|e| format!("Can't back up the current state first: {e}"))?;
         self.board.restore(&snapshot);
+        // The way out of a damaged own file: what's restored may replace it.
+        self.folder.save_anyway();
         self.dirty = true;
         self.selected = None;
         self.filters.clear();
@@ -2552,8 +2731,11 @@ impl PriogatorApp {
                 }
             });
         });
-        if changed && let Err(e) = self.config.save() {
-            self.errors = vec![format!("Saving settings failed: {e}")];
+        // Saved once a drag (e.g. of the column width) is over, not every frame.
+        self.config_dirty |= changed;
+        if self.config_dirty && !ctx.input(|i| i.pointer.any_down()) {
+            self.config_dirty = false;
+            self.save_config();
         }
         if open_backups {
             self.settings_open = false;
@@ -2573,8 +2755,12 @@ impl PriogatorApp {
         }
         let state = self.updater.state();
         if let State::Installed(bundle) = &state {
-            // Quit (saving, see on_exit) and start the new version.
-            crate::update::relaunch_after_exit(bundle);
+            // Quit (saving, see on_exit) and start the new version, once:
+            // more frames may come before the app is gone.
+            if !self.relaunching {
+                self.relaunching = true;
+                crate::update::relaunch_after_exit(bundle);
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
@@ -3595,6 +3781,7 @@ impl eframe::App for PriogatorApp {
         self.group_editor(&ctx);
         self.area_editor(&ctx);
         self.confirm_delete_area(&ctx);
+        self.damage_dialog(&ctx);
         self.settings_dialog(&ctx);
         self.backups_dialog(&ctx);
         self.about_dialog(&ctx);
@@ -3626,9 +3813,15 @@ impl eframe::App for PriogatorApp {
 }
 
 impl PriogatorApp {
+    /// Last chance for unsaved changes. If they can't go into the sync
+    /// file (saving waits, or fails), they go into a backup instead, so
+    /// quitting never just drops them; restore it from ☰ → Backups….
     fn save_on_exit(&mut self) {
-        if self.dirty {
-            let _ = self.folder.save(&self.board);
+        if self.config_dirty {
+            self.save_config();
+        }
+        if self.dirty && self.folder.save(&mut self.board).is_err() {
+            let _ = self.backups.now(&self.board);
         }
     }
 }
@@ -3663,7 +3856,7 @@ mod tests {
         let mut folder = SyncFolder::new(&config.sync_dir, &config.device);
         let (mut board, _) = folder.load();
         crate::demo::fill(&mut board, today());
-        folder.save(&board).unwrap();
+        folder.save(&mut board).unwrap();
         config
     }
 
@@ -3672,8 +3865,16 @@ mod tests {
         config: Config,
         theme: egui::Theme,
     ) -> egui_kittest::Harness<'static, PriogatorApp> {
+        harness_sized(config, theme, [1280.0, 800.0])
+    }
+
+    pub(super) fn harness_sized(
+        config: Config,
+        theme: egui::Theme,
+        size: [f32; 2],
+    ) -> egui_kittest::Harness<'static, PriogatorApp> {
         egui_kittest::Harness::builder()
-            .with_size([1280.0, 800.0])
+            .with_size(size)
             .with_pixels_per_point(2.0)
             .with_theme(theme)
             // Same setup as the real app, fonts included (see fonts::install).

@@ -241,6 +241,102 @@ fn save(h: &mut H) {
     assert!(h.state().task_editor.is_none(), "Save closes the dialog");
 }
 
+#[test]
+fn a_long_checklist_can_be_edited_in_the_smallest_window() {
+    let dir = tempfile::tempdir().unwrap();
+    // The window can't be made smaller than this (see main.rs).
+    let mut h =
+        super::tests::harness_sized(demo_config(dir.path()), egui::Theme::Light, [700.0, 400.0]);
+    h.run_steps(2);
+    // (On top, so in view in the small window.)
+    open(&mut h, "Send quarterly report");
+    let subtasks = &mut h.state_mut().task_editor.as_mut().unwrap().details.subtasks;
+    for i in 1..=40 {
+        subtasks.push(crate::model::Subtask::new(&format!("Step {i}")));
+    }
+    h.run_steps(8);
+    let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(700.0, 400.0));
+    assert!(window.contains_rect(button(&h, "Save").rect()));
+    assert!(window.contains_rect(button(&h, "Cancel").rect()));
+
+    // Scroll down to the last subtask and change it.
+    let last_field = By::new()
+        .role(egui::accesskit::Role::TextInput)
+        .value("Step 40");
+    let last = |h: &H| h.get(last_field.clone()).rect();
+    let save_top = button(&h, "Save").rect().top();
+    assert!(last(&h).top() > save_top, "out of view at first");
+    let inside = egui::pos2(350.0, save_top - 60.0);
+    h.hover_at(inside);
+    for _ in 0..40 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -200.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: Modifiers::NONE,
+        });
+        h.run_steps(1);
+    }
+    h.run_steps(4);
+    let field = last(&h);
+    assert!(field.bottom() < save_top, "scrolled into view: {field:?}");
+    h.get(last_field.clone()).click();
+    h.run_steps(2);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.event(egui::Event::Text("Last step".into()));
+    h.run_steps(2);
+    save(&mut h);
+    let task = task(&h, "Send quarterly report");
+    assert_eq!(task.subtasks.len(), 40);
+    assert_eq!(task.subtasks[39].title, "Last step");
+}
+
+#[test]
+fn a_task_deleted_on_another_computer_while_its_dialog_is_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = app(&dir);
+    let id = id_of(&h, "Read team feedback");
+    open(&mut h, "Read team feedback");
+    h.state_mut().task_editor.as_mut().unwrap().details.notes = "Ask Anna too".into();
+
+    let mut laptop = h.state().board.clone();
+    laptop.device = "laptop".into();
+    laptop.delete_task(id);
+    SyncFolder::new(&dir.path().join("sync"), "laptop")
+        .save(&mut laptop)
+        .unwrap();
+    h.state_mut().last_scan = Instant::now() - SCAN_INTERVAL;
+    h.run_steps(4);
+    assert!(h.state().board.tasks[&id].meta.deleted);
+    assert!(h.state().task_editor.is_some(), "the dialog stays open");
+
+    // Saving keeps what was typed: the task comes back with it.
+    save(&mut h);
+    let task = &h.state().board.tasks[&id];
+    assert!(!task.meta.deleted);
+    assert_eq!(task.notes, "Ask Anna too");
+    assert!(h.query_by_label("Read team feedback").is_some());
+}
+
+#[test]
+fn a_long_checklist_scrolls_and_save_stays_in_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = app(&dir);
+    open(&mut h, "Read team feedback");
+    let subtasks = &mut h.state_mut().task_editor.as_mut().unwrap().details.subtasks;
+    for i in 1..=40 {
+        subtasks.push(crate::model::Subtask::new(&format!("Step {i}")));
+    }
+    // (The dialog re-centres for a few frames after growing.)
+    h.run_steps(8);
+    let save_button = button(&h, "Save").rect();
+    assert!(save_button.bottom() <= 800.0, "{save_button:?}");
+    assert!(button(&h, "Cancel").rect().bottom() <= 800.0);
+    save(&mut h);
+    assert_eq!(task(&h, "Read team feedback").subtasks.len(), 40);
+}
+
 /// Replace the text of the field currently showing `old`.
 fn retype(h: &mut H, old: &str, new: &str) {
     h.get(By::new().role(egui::Role::TextInput).value(old))
@@ -814,6 +910,44 @@ fn option_arrows_work_in_the_top_section_too() {
 }
 
 #[test]
+fn keys_dont_act_on_a_task_in_an_area_that_folded() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = app(&dir);
+    let family = area(&h, 3);
+    let id = id_of(&h, "Plan weekend trip");
+    select(&mut h, "Plan weekend trip");
+    assert_eq!(h.state().selected, Some(id));
+    // Family folds without a click (e.g. its active hours end).
+    h.state_mut().config.folded_areas.push(family);
+    h.run_steps(2);
+    press(&mut h, egui::Modifiers::COMMAND, egui::Key::Backspace);
+    assert!(!h.state().board.tasks[&id].meta.deleted);
+    assert!(h.state().selected.is_none());
+}
+
+#[test]
+fn keys_dont_act_on_a_task_a_filter_hides() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = app(&dir);
+    let work = area(&h, 0);
+    let id = id_of(&h, "Read team feedback");
+    select(&mut h, "Read team feedback");
+    let clients = h
+        .state()
+        .board
+        .groups_of(work)
+        .iter()
+        .find(|g| g.name == "Clients")
+        .unwrap()
+        .meta
+        .id;
+    h.state_mut().filters.insert(work, clients);
+    h.run_steps(2);
+    press(&mut h, egui::Modifiers::COMMAND, egui::Key::Backspace);
+    assert!(!h.state().board.tasks[&id].meta.deleted);
+}
+
+#[test]
 fn command_backspace_deletes_and_escape_deselects() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = app(&dir);
@@ -919,6 +1053,38 @@ fn center(h: &H, title: &str) -> egui::Pos2 {
 fn above(h: &H, title: &str) -> egui::Pos2 {
     let r = h.get_by_label(title).rect();
     egui::pos2(r.center().x, r.top() - 6.0)
+}
+
+#[test]
+fn dragging_in_a_filtered_area_keeps_the_hidden_tasks_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = app(&dir);
+    let house = area(&h, 2);
+    let garden = h
+        .state()
+        .board
+        .groups_of(house)
+        .iter()
+        .find(|g| g.name == "Garden")
+        .unwrap()
+        .meta
+        .id;
+    let before = priorities(&h, house);
+    h.state_mut().filters.insert(house, garden);
+    h.run_steps(2);
+    assert!(h.query_by_label("Fix dripping tap").is_none(), "hidden");
+
+    let from = center(&h, "Order tulip bulbs");
+    let to = above(&h, "Cut back the hedge");
+    drag(&mut h, from, to);
+    let mut expected = before.clone();
+    expected.retain(|t| t != "Order tulip bulbs");
+    let hedge = expected
+        .iter()
+        .position(|t| t == "Cut back the hedge")
+        .unwrap();
+    expected.insert(hedge, "Order tulip bulbs".to_owned());
+    assert_eq!(priorities(&h, house), expected, "was {before:?}");
 }
 
 #[test]

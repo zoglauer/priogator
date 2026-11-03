@@ -111,6 +111,16 @@ pub struct TaskItem {
     /// Card colour chosen for this task; overrides the colour scheme.
     #[serde(default)]
     pub color: Option<[u8; 3]>,
+    /// Day of the month a monthly or yearly series is due on, kept by the
+    /// next occurrences when a short month moved one earlier (Jan 31 →
+    /// Feb 28 → Mar 31). `None`: the deadline's day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_day: Option<i8>,
+    /// Recurring task reopened by hand while its next occurrence, edited
+    /// meanwhile, stays open too. Tells that apart from a completion on
+    /// another computer (`Board::keep_completions`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reopened: bool,
     pub done: bool,
     pub created_at: Timestamp,
     pub completed_at: Option<Timestamp>,
@@ -220,6 +230,8 @@ mod tests {
                 unit: crate::repeat::Unit::Months,
             }),
             color: Some([1, 2, 3]),
+            repeat_day: Some(31),
+            reopened: true,
             done: true,
             created_at: Timestamp::now(),
             completed_at: Some(Timestamp::now()),
