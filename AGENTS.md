@@ -140,6 +140,10 @@ After a change the owner will look at, rebuild and reinstall the app:
 - Settings: only a missing `config.json` means first start. Unreadable or
   invalid settings are reported (a dialog via rfd) and left alone.
 - Undo/redo and backup restore go through `Board::restore`.
+- The Log (☰ → Log…, or a click on the toolbar's done count) lists every
+  completed task by its `completed_at`, by local day (`Board::achieved`,
+  `log_dialog`). Nothing extra is stored: it relies on done tasks never
+  being purged, so keep it that way.
 - Backups: `backup-YYYY-MM-DD-HHMMSS.json`, one automatic per day, kept:
   all from the last 7 days, then weekly up to 2 months, monthly up to 2
   years, yearly after that. `prune` deletes at most `MAX_PRUNED` (3) per

@@ -25,11 +25,11 @@ On Linux, use **Ctrl** wherever this guide says **⌘**.
   - **Overdue:** open tasks whose deadline has passed.
   - **Due within 7 days:** open tasks due today or within the next 7 days.
   - **Done:** tasks completed within the last 7 days (the number of days
-    follows the *Done tasks stay visible* setting).
+    follows the *Done tasks stay visible* setting). Click it for the **Log**.
 - **⚠ 1 problem** (red) appears only when something went wrong, e.g. a sync
   file couldn't be read. Hover for details; click to dismiss.
 - **Undo ↶ / redo ↷** and the **menu ☰** on the right. The menu has
-  **New task…** (⌘N), **Settings…** (⌘,), **Backups…**, **Keyboard
+  **New task…** (⌘N), **Settings…** (⌘,), **Log…**, **Backups…**, **Keyboard
   shortcuts** and **About Priogator**. About shows the version, the
   **License** (Apache 2.0) and **Acknowledgements**: thanks to the
   open-source projects Priogator is built on, with every library's license.
@@ -218,6 +218,11 @@ from the priority list into the top section puts it exactly where you let go.
   under **Done tasks stay visible for** in Settings. Hidden tasks aren't
   deleted: they stay in your data and backups, and a longer setting shows
   them again.
+- **Log:** ☰ → **Log…**, or click *… done in the last 7 days* in the
+  toolbar. It lists every task you've completed, however long ago, by day
+  and newest first: the time it was ticked off, its title, area and group,
+  and how many were done that day. Choose an area at the top to see only
+  that one. Reopening a task takes it out of the log; deleting it does too.
 - **Delete:** right-click → **Delete**, ⌘⌫, or **Delete** at the top right of
   the edit dialog.
   There's no confirmation; ⌘Z undoes it.

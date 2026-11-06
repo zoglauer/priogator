@@ -192,6 +192,8 @@ pub struct PriogatorApp {
     about_page: AboutPage,
     settings_open: bool,
     shortcuts_open: bool,
+    /// The log of completed tasks, showing all areas (`None`) or one.
+    log: Option<Option<Uuid>>,
     #[cfg(target_os = "macos")]
     updater: crate::update::Updater,
     #[cfg(target_os = "macos")]
@@ -452,6 +454,7 @@ impl PriogatorApp {
             about_page: AboutPage::Main,
             settings_open: false,
             shortcuts_open: false,
+            log: None,
             #[cfg(target_os = "macos")]
             updater: crate::update::Updater::new(),
             #[cfg(target_os = "macos")]
@@ -568,6 +571,7 @@ impl PriogatorApp {
             || self.about_open
             || self.settings_open
             || self.shortcuts_open
+            || self.log.is_some()
             || self.update_dialog_open()
     }
 
@@ -945,7 +949,7 @@ impl PriogatorApp {
     }
 
     /// "16 open · 1 overdue · 3 due within 7 days · 1 done in the last 7 days"
-    fn statistics(&self, ui: &mut egui::Ui) {
+    fn statistics(&mut self, ui: &mut egui::Ui) {
         let stats = self.board.stats(today());
         let dot = || RichText::new("·").weak();
         ui.label(format!("{} open", stats.open))
@@ -970,8 +974,15 @@ impl PriogatorApp {
             1 => "today".to_owned(),
             n => format!("in the last {n} days"),
         };
-        ui.label(format!("{} done {done_days}", stats.done_recently))
-            .on_hover_text("Tasks completed recently (see Settings)");
+        let done = ui
+            .add(
+                egui::Label::new(format!("{} done {done_days}", stats.done_recently))
+                    .sense(egui::Sense::click()),
+            )
+            .on_hover_text("Tasks completed recently (see Settings). Click for the log of all.");
+        if done.clicked() {
+            self.log = Some(None);
+        }
     }
 
     /// A tooltip: what's counted, then the tasks themselves, e.g.
@@ -1021,6 +1032,9 @@ impl PriogatorApp {
                 .clicked()
             {
                 self.settings_open = true;
+            }
+            if ui.button("Log…").clicked() {
+                self.log = Some(None);
             }
             if ui.button("Backups…").clicked() {
                 self.backups_dialog = Some(self.load_backups_dialog());
@@ -2915,6 +2929,112 @@ impl PriogatorApp {
         }
     }
 
+    /// What was achieved when: every completed task, by day, newest first.
+    fn log_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut area) = self.log else {
+            return;
+        };
+        let areas = self.board.areas_sorted();
+        if area.is_some_and(|a| !areas.iter().any(|x| x.meta.id == a)) {
+            area = None;
+        }
+        let area_name = |id: Uuid| {
+            areas
+                .iter()
+                .find(|a| a.meta.id == id)
+                .map_or("", |a| a.name.as_str())
+        };
+        let tasks = self.board.achieved(area);
+        let tz = jiff::tz::TimeZone::system();
+        let today = today();
+        let max_height = (ctx.content_rect().height() - 200.0).max(200.0);
+        let modal = egui::Modal::new(egui::Id::unique("log")).show(ctx, |ui| {
+            ui.set_width(440.0);
+            ui.heading("Log");
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("log_area")
+                    .selected_text(area.map_or("All areas", area_name))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut area, None, "All areas");
+                        for a in &areas {
+                            ui.selectable_value(&mut area, Some(a.meta.id), &a.name);
+                        }
+                    });
+                ui.label(RichText::new(format!("{} done", plural(tasks.len(), "task"))).weak());
+            });
+            ui.add_space(8.0);
+            egui::ScrollArea::vertical()
+                .max_height(max_height)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    if tasks.is_empty() {
+                        ui.label(RichText::new("Nothing done yet.").weak().italics());
+                    }
+                    let mut day = None;
+                    for (i, task) in tasks.iter().enumerate() {
+                        let Some(at) = task.completed_at else {
+                            continue;
+                        };
+                        let at = at.to_zoned(tz.clone());
+                        if day != Some(at.date()) {
+                            day = Some(at.date());
+                            let count = tasks[i..]
+                                .iter()
+                                .take_while(|t| {
+                                    t.completed_at
+                                        .is_some_and(|c| c.to_zoned(tz.clone()).date() == at.date())
+                                })
+                                .count();
+                            if i > 0 {
+                                ui.add_space(8.0);
+                            }
+                            ui.label(
+                                RichText::new(format!("{} · {count}", log_day(at.date(), today)))
+                                    .strong(),
+                            );
+                            ui.separator();
+                        }
+                        ui.horizontal_top(|ui| {
+                            // Fixed width, right-aligned, so the titles line up.
+                            let time = egui::vec2(40.0, ui.spacing().interact_size.y);
+                            ui.allocate_ui_with_layout(
+                                time,
+                                egui::Layout::right_to_left(egui::Align::Min),
+                                |ui| {
+                                    ui.set_min_size(time);
+                                    ui.label(
+                                        RichText::new(at.strftime("%H:%M").to_string()).weak(),
+                                    );
+                                },
+                            );
+                            ui.vertical(|ui| {
+                                ui.add(egui::Label::new(&task.title).wrap());
+                                let mut place = area_name(task.area).to_owned();
+                                if let Some(g) = task.group.and_then(|g| self.board.group(g)) {
+                                    place.push_str(&format!(" · {}", g.name));
+                                }
+                                ui.label(RichText::new(place).small().weak());
+                            });
+                        });
+                    }
+                });
+            ui.add_space(8.0);
+            let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+            ui.allocate_ui_with_layout(
+                row,
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| ui.button("Close").clicked(),
+            )
+            .inner
+        });
+        self.log = if modal.inner || modal.should_close() {
+            None
+        } else {
+            Some(area)
+        };
+    }
+
     fn about_dialog(&mut self, ctx: &egui::Context) {
         if !self.about_open {
             return;
@@ -3583,6 +3703,17 @@ fn group_combo(
 }
 
 /// "Wed, Oct 29, 2026 · 16:41".
+/// "Today", "Yesterday", "Wednesday, Nov 4", or with the year if it's not
+/// this one: "Tue, Nov 4, 2025".
+fn log_day(day: Date, today: Date) -> String {
+    match (today - day).get_days() {
+        0 => "Today".to_owned(),
+        1 => "Yesterday".to_owned(),
+        _ if day.year() == today.year() => day.strftime("%A, %b %-d").to_string(),
+        _ => day.strftime("%a, %b %-d, %Y").to_string(),
+    }
+}
+
 fn backup_label(file: &BackupFile) -> String {
     let date = file.date.strftime("%a, %b %-d, %Y");
     match file.time.get(..5) {
@@ -3786,6 +3917,7 @@ impl eframe::App for PriogatorApp {
         self.backups_dialog(&ctx);
         self.about_dialog(&ctx);
         self.shortcuts_dialog(&ctx);
+        self.log_dialog(&ctx);
         #[cfg(target_os = "macos")]
         self.update(&ctx);
         open_links(&ctx);
@@ -4313,11 +4445,39 @@ mod tests {
                 image.save(format!("{prefix}-repeat.png")).expect("save");
 
                 let app = harness.state_mut();
+                let before_log = app.board.clone();
                 let house = app.board.areas_sorted()[2].meta.id;
                 app.open_new_task(house);
                 harness.run_steps(4);
                 let image = harness.render().expect("render");
                 image.save(format!("{prefix}-new-task.png")).expect("save");
+
+                // The log, with a few tasks done over the last days.
+                let app = harness.state_mut();
+                app.task_editor = None;
+                let now = jiff::Timestamp::now();
+                let open: Vec<Uuid> = app
+                    .board
+                    .tasks
+                    .values()
+                    .filter(|t| !t.done && !t.meta.deleted)
+                    .map(|t| t.meta.id)
+                    .take(5)
+                    .collect();
+                for (i, id) in open.into_iter().enumerate() {
+                    app.board.update_task(id, |t| {
+                        t.done = true;
+                        t.completed_at =
+                            Some(now - jiff::SignedDuration::from_hours(20 * i as i64 + 1));
+                    });
+                }
+                app.log = Some(None);
+                harness.run_steps(4);
+                let image = harness.render().expect("render");
+                image.save(format!("{prefix}-log.png")).expect("save");
+                let app = harness.state_mut();
+                app.log = None;
+                app.board.restore(&before_log);
 
                 // An update found: the toolbar button and the dialog.
                 #[cfg(target_os = "macos")]

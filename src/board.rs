@@ -320,6 +320,20 @@ impl Board {
         list
     }
 
+    /// Every completed task, however long ago, most recent first: the log of
+    /// what was achieved. Only live areas, or just `area`.
+    pub fn achieved(&self, area: Option<Uuid>) -> Vec<&TaskItem> {
+        let live_areas: Vec<Uuid> = self.areas_sorted().iter().map(|a| a.meta.id).collect();
+        let mut list: Vec<_> = self
+            .tasks
+            .values()
+            .filter(|t| t.done && !t.meta.deleted && t.completed_at.is_some())
+            .filter(|t| area.map_or(live_areas.contains(&t.area), |a| t.area == a))
+            .collect();
+        list.sort_by_key(|t| std::cmp::Reverse(t.completed_at));
+        list
+    }
+
     /// The group, unless it has been deleted.
     pub fn group(&self, id: Uuid) -> Option<&TaskGroup> {
         self.groups.get(&id).filter(|g| !g.meta.deleted)
@@ -1380,6 +1394,36 @@ mod tests {
         b.done_days = 14;
         assert_eq!(shown(&b), ["done today", "done 10 days ago"]);
         assert_eq!(b.stats(TODAY).done_recently, 2);
+    }
+
+    #[test]
+    fn the_log_keeps_every_completed_task() {
+        let (mut b, work) = board_with_area("mac");
+        let house = b.add_area("House");
+        let gone = b.add_area("Gone");
+        let recent = b.add_task(work, "done today", None, None);
+        let old = b.add_task(house, "done a year ago", None, None);
+        let open = b.add_task(work, "still open", None, None);
+        let deleted = b.add_task(work, "done, then deleted", None, None);
+        let in_gone = b.add_task(gone, "done in a deleted area", None, None);
+        for id in [recent, old, deleted, in_gone] {
+            b.set_done(id, true);
+        }
+        let year_ago = Timestamp::now() - jiff::SignedDuration::from_hours(24 * 365);
+        b.update_task(old, |t| t.completed_at = Some(year_ago));
+        b.delete_task(deleted);
+        b.delete_area(gone);
+
+        let titles = |list: Vec<&TaskItem>| -> Vec<String> {
+            list.iter().map(|t| t.title.clone()).collect()
+        };
+        // Older than done_days still counts, newest first.
+        assert_eq!(titles(b.achieved(None)), ["done today", "done a year ago"]);
+        assert_eq!(titles(b.achieved(Some(house))), ["done a year ago"]);
+        assert!(b.achieved(Some(work)).iter().all(|t| t.meta.id != open));
+        // Reopened: no longer achieved.
+        b.set_done(recent, false);
+        assert_eq!(titles(b.achieved(None)), ["done a year ago"]);
     }
 
     #[test]

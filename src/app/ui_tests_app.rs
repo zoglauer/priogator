@@ -1885,7 +1885,7 @@ fn escape_closes_dialogs_without_saving() {
             .any(|g| g.name == "Not saved")
     );
     // About, shortcuts, backups.
-    for entry in ["About Priogator", "Keyboard shortcuts", "Backups…"] {
+    for entry in ["About Priogator", "Keyboard shortcuts", "Backups…", "Log…"] {
         menu(&mut h, entry);
         assert!(h.state().editing(), "{entry} opened");
         h.key_press(egui::Key::Escape);
@@ -2078,4 +2078,80 @@ fn the_automatic_check_follows_the_setting() {
         h.query_by_label("Update to 99.0.0").is_some(),
         "found by itself"
     );
+}
+
+#[test]
+fn the_log_shows_what_was_done_when() {
+    let (_dir, mut h) = app();
+    // Done long ago: still in the log, under its date with the year.
+    let old = task_id(&h, "Book dentist appointment");
+    let long_ago = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * 400);
+    h.state_mut()
+        .board
+        .update_task(old, |t| t.completed_at = Some(long_ago));
+    let house = area_id(&h, "House");
+    let trash = task_id(&h, "Take out the trash");
+    h.state_mut().board.set_done(trash, true);
+    h.run_steps(4);
+
+    menu(&mut h, "Log…");
+    assert_eq!(h.state().log, Some(None));
+    let day = long_ago
+        .to_zoned(jiff::tz::TimeZone::system())
+        .date()
+        .strftime("%a, %b %-d, %Y · 1")
+        .to_string();
+    for text in ["Today · 1", &day, "2 tasks done"] {
+        assert!(h.query_by_label(text).is_some(), "{text}");
+    }
+    // Long gone from the Done section, but in the log.
+    assert!(h.query_by_label("Book dentist appointment").is_some());
+
+    // Only one area.
+    let combo = h.get_by_role(Role::ComboBox).rect();
+    h.get_by_role(Role::ComboBox).click();
+    h.run_steps(4);
+    // The entry in the popup, not the area's title behind the dialog.
+    h.get_all_by_label("House")
+        .find(|n| n.rect().top() > combo.bottom() && (n.rect().left() - combo.left()).abs() < 40.0)
+        .unwrap()
+        .click();
+    h.run_steps(4);
+    assert_eq!(h.state().log, Some(Some(house)));
+    assert!(h.query_by_label("1 task done").is_some());
+    assert!(h.query_by_label("Book dentist appointment").is_none());
+
+    button(&h, "Close").click();
+    h.run_steps(4);
+    assert_eq!(h.state().log, None);
+}
+
+#[test]
+fn the_done_count_opens_the_log() {
+    let (_dir, mut h) = app();
+    h.get_by_label_contains("done in the last").click();
+    h.run_steps(4);
+    assert_eq!(h.state().log, Some(None));
+    assert!(h.state().editing());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(4);
+    assert_eq!(h.state().log, None);
+}
+
+#[test]
+fn the_log_says_when_nothing_is_done() {
+    let (_dir, mut h) = app();
+    let done: Vec<Uuid> = h
+        .state()
+        .board
+        .achieved(None)
+        .iter()
+        .map(|t| t.meta.id)
+        .collect();
+    for id in done {
+        h.state_mut().board.set_done(id, false);
+    }
+    menu(&mut h, "Log…");
+    assert!(h.query_by_label("Nothing done yet.").is_some());
+    assert!(h.query_by_label("0 tasks done").is_some());
 }
