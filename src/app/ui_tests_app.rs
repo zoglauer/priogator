@@ -2155,3 +2155,44 @@ fn the_log_says_when_nothing_is_done() {
     assert!(h.query_by_label("Nothing done yet.").is_some());
     assert!(h.query_by_label("0 tasks done").is_some());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_narrow_window_leaves_out_statistics_instead_of_overlapping() {
+    let (_dir, mut h) = app();
+    h.state_mut().updater = crate::update::Updater::with_fetch(release_answer("v99.0.0"));
+    menu(&mut h, "Check for Updates…");
+    wait_for_update_check(&mut h);
+    button(&h, "Later").click();
+    h.run_steps(4);
+    let shown = |h: &Harness| -> Vec<egui::Rect> {
+        ["open", "overdue", "due within", "done in"]
+            .iter()
+            .filter_map(|t| {
+                // In the toolbar; cards can say "overdue" too.
+                h.query_all(By::new().label_contains(t))
+                    .map(|n| n.rect())
+                    .find(|r| r.top() < 40.0)
+            })
+            .collect()
+    };
+    assert_eq!(shown(&h).len(), 4, "all there in a wide window");
+
+    for width in [900.0, 700.0, 520.0] {
+        h.set_size(egui::vec2(width, 600.0));
+        h.run_steps(4);
+        let update = button(&h, "Update to 99.0.0").rect();
+        let stats = shown(&h);
+        assert!(stats.len() < 4, "{width}: something left out");
+        for rect in stats {
+            assert!(
+                rect.right() < update.left(),
+                "{width}: overlaps the update button"
+            );
+        }
+        assert!(
+            button(&h, "+ New task").rect().right() < update.left(),
+            "{width}"
+        );
+    }
+}

@@ -862,126 +862,185 @@ impl PriogatorApp {
         }
     }
 
+    /// The right side (menu, undo, update, warnings) is laid out first; the
+    /// left side gets what's left, so a narrow window never overlaps them.
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let (logo, _) = ui.allocate_exact_size(egui::Vec2::splat(24.0), Sense::hover());
-            paint_logo(ui.painter(), logo);
-            ui.label(RichText::new("Priogator").font(crate::fonts::bold(18.0)));
-            ui.add_space(8.0);
-            if ui
-                .button("+ New task")
-                .on_hover_text("Add a task (⌘N). Or right-click an empty spot in an area.")
-                .clicked()
-            {
-                self.new_task_in_current_column();
-            }
-            ui.add_space(12.0);
-            self.statistics(ui);
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.menu(ui);
-                let redo = ui
-                    .add_enabled(!self.redo.is_empty(), egui::Button::new("↷"))
-                    .on_hover_text("Redo (⇧⌘Z)");
-                let undo = ui
-                    .add_enabled(!self.undo.is_empty(), egui::Button::new("↶"))
-                    .on_hover_text("Undo (⌘Z)");
-                #[cfg(target_os = "macos")]
-                if let crate::update::State::Available(release) = self.updater.state() {
-                    ui.add_space(8.0);
-                    let button = egui::Button::new(
-                        RichText::new(format!("Update to {}", release.version))
-                            .color(Color32::WHITE),
-                    )
-                    .fill(ui.visuals().selection.bg_fill);
-                    if ui
-                        .add(button)
-                        .on_hover_text("A new version of Priogator is available")
-                        .clicked()
-                    {
-                        self.update_dialog = true;
-                    }
-                }
-                if undo.clicked() {
-                    self.history_request = Some(History::Undo);
-                } else if redo.clicked() {
-                    self.history_request = Some(History::Redo);
-                }
-                if self.history_request.is_some() {
-                    ui.ctx().request_repaint();
-                }
-                // Separate from the problems below, so that dismissing those
-                // never lets anything be overwritten.
-                if let Some(why) = self.folder.not_saving() {
-                    ui.add_space(8.0);
-                    let warning = RichText::new("⚠ Not saved").color(OVERDUE).strong();
-                    let response = ui
-                        .add(egui::Button::new(warning).frame(false))
-                        .on_hover_text(match why.kind {
-                            Waiting::Damaged => format!("{}\n\nClick for what to do.", why.message),
-                            Waiting::NewerFormat => {
-                                format!("{}\n\nClick to check for updates.", why.message)
-                            }
-                            Waiting::Other => why.message.clone(),
-                        });
-                    if response.clicked() {
-                        match why.kind {
-                            Waiting::Damaged => self.damage_dialog = true,
-                            Waiting::NewerFormat => self.offer_update(ui.ctx()),
-                            Waiting::Other => {}
+        let row = egui::vec2(
+            ui.available_width(),
+            24.0_f32.max(ui.spacing().interact_size.y),
+        );
+        let (_, rect) = ui.allocate_space(row);
+        let right = ui
+            .scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                |ui| {
+                    self.menu(ui);
+                    let redo = ui
+                        .add_enabled(!self.redo.is_empty(), egui::Button::new("↷"))
+                        .on_hover_text("Redo (⇧⌘Z)");
+                    let undo = ui
+                        .add_enabled(!self.undo.is_empty(), egui::Button::new("↶"))
+                        .on_hover_text("Undo (⌘Z)");
+                    #[cfg(target_os = "macos")]
+                    if let crate::update::State::Available(release) = self.updater.state() {
+                        ui.add_space(8.0);
+                        let button = egui::Button::new(
+                            RichText::new(format!("Update to {}", release.version))
+                                .color(Color32::WHITE),
+                        )
+                        .fill(ui.visuals().selection.bg_fill);
+                        if ui
+                            .add(button)
+                            .on_hover_text("A new version of Priogator is available")
+                            .clicked()
+                        {
+                            self.update_dialog = true;
                         }
                     }
-                }
-                if !self.errors.is_empty() {
-                    ui.add_space(8.0);
-                    let warning =
-                        RichText::new(format!("⚠ {}", plural(self.errors.len(), "problem")))
-                            .color(OVERDUE);
-                    let response = ui
-                        .add(egui::Button::new(warning).frame(false))
-                        .on_hover_text(format!("{}\n\nClick to dismiss.", self.errors.join("\n")));
-                    if response.clicked() {
-                        self.errors.clear();
+                    if undo.clicked() {
+                        self.history_request = Some(History::Undo);
+                    } else if redo.clicked() {
+                        self.history_request = Some(History::Redo);
                     }
+                    if self.history_request.is_some() {
+                        ui.ctx().request_repaint();
+                    }
+                    // Separate from the problems below, so that dismissing those
+                    // never lets anything be overwritten.
+                    if let Some(why) = self.folder.not_saving() {
+                        ui.add_space(8.0);
+                        let warning = RichText::new("⚠ Not saved").color(OVERDUE).strong();
+                        let response = ui
+                            .add(egui::Button::new(warning).frame(false))
+                            .on_hover_text(match why.kind {
+                                Waiting::Damaged => {
+                                    format!("{}\n\nClick for what to do.", why.message)
+                                }
+                                Waiting::NewerFormat => {
+                                    format!("{}\n\nClick to check for updates.", why.message)
+                                }
+                                Waiting::Other => why.message.clone(),
+                            });
+                        if response.clicked() {
+                            match why.kind {
+                                Waiting::Damaged => self.damage_dialog = true,
+                                Waiting::NewerFormat => self.offer_update(ui.ctx()),
+                                Waiting::Other => {}
+                            }
+                        }
+                    }
+                    if !self.errors.is_empty() {
+                        ui.add_space(8.0);
+                        let warning =
+                            RichText::new(format!("⚠ {}", plural(self.errors.len(), "problem")))
+                                .color(OVERDUE);
+                        let response = ui
+                            .add(egui::Button::new(warning).frame(false))
+                            .on_hover_text(format!(
+                                "{}\n\nClick to dismiss.",
+                                self.errors.join("\n")
+                            ));
+                        if response.clicked() {
+                            self.errors.clear();
+                        }
+                    }
+                },
+            )
+            .response
+            .rect;
+        let left = egui::Rect::from_min_max(rect.min, egui::pos2(right.left() - 12.0, rect.max.y));
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(left)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                ui.set_clip_rect(left.intersect(ui.clip_rect()));
+                let (logo, _) = ui.allocate_exact_size(egui::Vec2::splat(24.0), Sense::hover());
+                paint_logo(ui.painter(), logo);
+                ui.label(RichText::new("Priogator").font(crate::fonts::bold(18.0)));
+                ui.add_space(8.0);
+                if ui
+                    .button("+ New task")
+                    .on_hover_text("Add a task (⌘N). Or right-click an empty spot in an area.")
+                    .clicked()
+                {
+                    self.new_task_in_current_column();
                 }
-            });
-        });
+                ui.add_space(12.0);
+                self.statistics(ui);
+            },
+        );
     }
 
     /// "16 open · 1 overdue · 3 due within 7 days · 1 done in the last 7 days"
+    /// In a narrow window, what doesn't fit is left out, from the end.
     fn statistics(&mut self, ui: &mut egui::Ui) {
         let stats = self.board.stats(today());
-        let dot = || RichText::new("·").weak();
-        ui.label(format!("{} open", stats.open))
-            .on_hover_text("Tasks not done yet, in all areas");
-        ui.label(dot());
-        let overdue = RichText::new(format!("{} overdue", stats.overdue.len()));
         let size = egui::TextStyle::Body.resolve(ui.style()).size;
-        ui.label(if stats.overdue.is_empty() {
-            overdue
-        } else {
-            overdue.color(OVERDUE).font(crate::fonts::bold(size))
-        })
-        .on_hover_text(self.task_list_tip("Open tasks whose deadline has passed", &stats.overdue));
-        ui.label(dot());
-        ui.label(format!("{} due within 7 days", stats.due_this_week.len()))
-            .on_hover_text(self.task_list_tip(
-                "Open tasks due today or within the next 7 days",
-                &stats.due_this_week,
-            ));
-        ui.label(dot());
+        let overdue = RichText::new(format!("{} overdue", stats.overdue.len()));
         let done_days = match self.board.done_days {
             1 => "today".to_owned(),
             n => format!("in the last {n} days"),
         };
-        let done = ui
-            .add(
-                egui::Label::new(format!("{} done {done_days}", stats.done_recently))
-                    .sense(egui::Sense::click()),
-            )
-            .on_hover_text("Tasks completed recently (see Settings). Click for the log of all.");
-        if done.clicked() {
-            self.log = Some(None);
+        let items = [
+            (
+                RichText::new(format!("{} open", stats.open)),
+                "Tasks not done yet, in all areas".to_owned(),
+            ),
+            (
+                if stats.overdue.is_empty() {
+                    overdue
+                } else {
+                    overdue.color(OVERDUE).font(crate::fonts::bold(size))
+                },
+                self.task_list_tip("Open tasks whose deadline has passed", &stats.overdue),
+            ),
+            (
+                RichText::new(format!("{} due within 7 days", stats.due_this_week.len())),
+                self.task_list_tip(
+                    "Open tasks due today or within the next 7 days",
+                    &stats.due_this_week,
+                ),
+            ),
+            (
+                RichText::new(format!("{} done {done_days}", stats.done_recently)),
+                "Tasks completed recently (see Settings). Click for the log of all.".to_owned(),
+            ),
+        ];
+        let width = |ui: &egui::Ui, text: &RichText| {
+            egui::WidgetText::from(text.clone())
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Body,
+                )
+                .size()
+                .x
+        };
+        let dot = RichText::new("·").weak();
+        let gap = width(ui, &dot) + 2.0 * ui.spacing().item_spacing.x;
+        for (i, (text, tip)) in items.into_iter().enumerate() {
+            let needed = width(ui, &text) + if i > 0 { gap } else { 0.0 };
+            if needed > ui.available_width() {
+                break;
+            }
+            if i > 0 {
+                ui.label(dot.clone());
+            }
+            let done = i == 3; // the done count opens the log
+            let label = egui::Label::new(text);
+            let response = if done {
+                ui.add(label.sense(egui::Sense::click()))
+            } else {
+                ui.add(label)
+            }
+            .on_hover_text(tip);
+            if done && response.clicked() {
+                self.log = Some(None);
+            }
         }
     }
 
