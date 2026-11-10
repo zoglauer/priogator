@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Priogator
+Comment=To-do list with columns and easy re-prioritizing
+Exec=priogator
+Icon=priogator
+Terminal=false
+Categories=Office;Utility;
+StartupWMClass=priogator

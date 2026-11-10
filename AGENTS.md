@@ -70,7 +70,7 @@ After a change the owner will look at, rebuild and reinstall the app:
 | `src/storage.rs` | `Config` (settings), `SyncFolder` (per-device files), migration from Prioritizer |
 | `src/backup.rs` | daily backups, retention, restore/delete |
 | `src/app.rs` | the whole UI, dialogs, and the UI tests (`mod tests` at the end) |
-| `src/fonts.rs`, `src/theme.rs` | system fonts via fontique, macOS label colours, dark mode |
+| `src/fonts.rs`, `src/theme.rs` | system fonts via fontique (bold: a variable font's weight axis, else the family's bold face), macOS label colours, dark mode |
 | `src/licenses.rs` | parses `assets/third-party-licenses.txt` for the About dialog |
 | `src/macos_menu.rs` | macOS app menu "About Priogator" opens our dialog (objc2) |
 | `src/demo.rs` | example data |
@@ -295,9 +295,20 @@ bumps `version` in `Cargo.toml` (and `Cargo.lock`), refreshes the license
 list, commits "Priogator X.Y.Z", tags `vX.Y.Z` and, after asking, pushes.
 Agents don't run it unless asked.
 
-The tag push starts GitHub Actions (`release.yml`, macOS runner): tests,
-universal `Priogator-X.Y.Z.dmg`, attached to the release with
-`.github/release-notes.md`.
+The tag push starts GitHub Actions (`release.yml`): tests on macOS and
+Linux, the universal `Priogator-X.Y.Z.dmg`, and `priogator_X.Y.Z-1_amd64.deb`
+/ `_arm64.deb` (`cargo deb`, metadata in `Cargo.toml`, built in an Ubuntu
+22.04 container so they need only glibc 2.35). A last job attaches them all
+to the release with `.github/release-notes.md`, only if everything passed.
+
+Linux package: the program, `assets/priogator.desktop` (also used by
+`install-linux.sh`), the icon, README/HELP/licenses. Libraries opened at run
+time (GL, EGL, Wayland, X11, fontconfig) are listed in `depends` by hand;
+check with a fresh install after changing renderer or windowing features.
+Locally on the Mac, build and try it in a **podman** container (Ubuntu
+22.04/24.04, Xvfb for a screenshot), not Docker. Run the tests there as an
+ordinary user: as root, the unreadable-folder tests fail. Install
+`fonts-noto-color-emoji`, or kittest stops at the date picker's 📆.
 
 Signing: `bundle-macos.sh` signs with the owner's "Developer ID Application:
 ANDREAS CHRISTIAN ZOGLAUER (Z86A9UVWNP)" (hardened runtime, no
@@ -312,5 +323,5 @@ The DMG's "Read Me First.txt" (`assets/dmg-read-me-first.txt`) and
 
 ## Open ideas (not started)
 
-- Test on Linux (fonts, file dialog, launcher entry).
-- Linux build in the release workflow.
+- Try the .deb on a real Linux desktop (file dialog, launcher entry, Wayland;
+  so far only Xvfb in a container).

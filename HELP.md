@@ -20,7 +20,8 @@ On Linux, use **Ctrl** wherever this guide says **⌘**.
   days · 1 done in the last 7 days*. Hover over one for its meaning;
   *overdue* and *due within 7 days* also list the tasks they count, with
   area and day. (A task due soon can still be in the priority list if it's
-  set to move to the top later.)
+  set to move to the top later.) In a narrow window, the ones that don't
+  fit are left out, from the right.
   - **Open:** tasks not done yet.
   - **Overdue:** open tasks whose deadline has passed.
   - **Due within 7 days:** open tasks due today or within the next 7 days.
@@ -284,6 +285,10 @@ are not touched. Nothing is ever installed without your click.
 untick **Check for updates automatically** in Settings. If an update can't
 be installed (e.g. the app sits in a folder you can't write to), the dialog
 says why and links to the releases page.
+
+On Linux there's no automatic update: ☰ → **Check for Updates…** opens the
+releases page. Download the new `.deb` and install it like the first one
+(`sudo apt install ./priogator_…_amd64.deb`); your tasks and settings stay.
 
 
 - **Add:** **+ Area** after the last area.

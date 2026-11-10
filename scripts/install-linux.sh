@@ -15,16 +15,8 @@ mkdir -p "$bin" "$apps" "$icons"
 
 install -m 755 target/release/priogator "$bin/priogator"
 install -m 644 assets/icon.png "$icons/priogator.png"
-cat > "$apps/priogator.desktop" <<DESKTOP
-[Desktop Entry]
-Type=Application
-Name=Priogator
-Comment=To-do list with columns and easy re-prioritizing
-Exec=$bin/priogator
-Icon=priogator
-Categories=Office;Utility;
-StartupWMClass=priogator
-DESKTOP
+# The same entry as in the .deb, with the full path to this copy.
+sed "s|^Exec=.*|Exec=$bin/priogator|" assets/priogator.desktop > "$apps/priogator.desktop"
 
 update-desktop-database "$apps" 2>/dev/null || true
 echo "Installed $bin/priogator and the launcher entry."

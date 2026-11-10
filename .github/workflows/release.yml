@@ -1,6 +1,7 @@
 # On a tag like v1.2.3: build a universal macOS app, sign it with the
 # Developer ID from the repo secrets, pack it into a DMG, have Apple notarize
-# it, and attach it to a GitHub release for that tag.
+# it; build Debian/Ubuntu packages for amd64 and arm64; and attach them all
+# to a GitHub release for that tag (once everything has succeeded).
 name: Release
 
 on:
@@ -62,15 +63,93 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: VERSION="${GITHUB_REF_NAME#v}" scripts/bundle-macos.sh --release
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: target/release/Priogator-*.dmg
+          if-no-files-found: error
+
+  # The tests on Linux, as an ordinary user (some check that unreadable
+  # folders are handled, which root could read anyway).
+  linux-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config libxkbcommon-dev \
+            libgl1-mesa-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev \
+            libxi-dev libfontconfig-dev fonts-dejavu-core fonts-noto-color-emoji
+
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+
+      - name: Test
+        run: cargo test
+
+  # Built on Ubuntu 22.04 (glibc 2.35), so the package also installs on
+  # Debian 12, Ubuntu 22.04 and later.
+  linux-deb:
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:22.04
+    steps:
+      - name: Install tools and libraries
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git \
+            build-essential pkg-config libxkbcommon-dev libgl1-mesa-dev \
+            libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libfontconfig-dev
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust and cargo-deb
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/cargo" install cargo-deb --locked
+
+      - name: Build package
+        run: cargo deb --locked
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.runner }}
+          path: target/debian/*.deb
+          if-no-files-found: error
+
+  publish:
+    needs: [macos, linux-test, linux-deb]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          dmg="target/release/Priogator-${GITHUB_REF_NAME#v}.dmg"
+          ls -l dist
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$dmg" --clobber
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "$dmg" \
+            gh release create "$GITHUB_REF_NAME" dist/* \
               --title "Priogator ${GITHUB_REF_NAME#v}" \
               --notes-file .github/release-notes.md
           fi

@@ -19,9 +19,13 @@ macOS:
 
     scripts/bundle-macos.sh --install   # builds Priogator.app into ~/Applications
 
-Linux (first install Rust and the system libraries listed below):
+Linux: the easiest is the `.deb` from the
+[releases](https://github.com/zoglauer/priogator/releases) (Debian 12,
+Ubuntu 22.04 or later): `sudo apt install ./priogator_…_amd64.deb`.
+To build it yourself, first install Rust and the system libraries listed below:
 
     scripts/install-linux.sh            # ~/.local/bin/priogator + app-launcher entry
+    cargo install cargo-deb && cargo deb   # or a package: target/debian/*.deb
 
 Libraries egui needs on Linux (Ubuntu/Debian names):
 
