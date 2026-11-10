@@ -626,6 +626,42 @@ fn subtasks_can_be_added_renamed_ticked_and_removed_in_the_dialog() {
 }
 
 #[test]
+fn a_subtask_typed_but_not_added_is_kept_on_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = app(&dir);
+    open(&mut h, "Plan weekend trip");
+    h.get(By::new().role(egui::Role::TextInput).value(""))
+        .click();
+    h.run_steps(2);
+    type_text(&mut h, "Pack bags");
+    // Straight to Save, without Add or Enter.
+    save(&mut h);
+    let subtasks: Vec<String> = task(&h, "Plan weekend trip")
+        .subtasks
+        .iter()
+        .map(|s| s.title.clone())
+        .collect();
+    assert_eq!(subtasks.last().map(String::as_str), Some("Pack bags"));
+    assert_eq!(subtasks.len(), 3, "{subtasks:?}");
+}
+
+#[test]
+fn a_subtask_typed_but_not_added_is_dropped_on_cancel() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = app(&dir);
+    let before = task(&h, "Plan weekend trip").subtasks.clone();
+    open(&mut h, "Plan weekend trip");
+    h.get(By::new().role(egui::Role::TextInput).value(""))
+        .click();
+    h.run_steps(2);
+    type_text(&mut h, "Pack bags");
+    h.get_by_label("Cancel").click();
+    h.run_steps(4);
+    assert!(h.state().task_editor.is_none());
+    assert_eq!(task(&h, "Plan weekend trip").subtasks, before);
+}
+
+#[test]
 fn cancelling_the_dialog_keeps_everything_as_it_was() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = app(&dir);

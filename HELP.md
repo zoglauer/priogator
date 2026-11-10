@@ -238,7 +238,8 @@ A task can have a checklist of subtasks, e.g. *Prepare kick-off workshop* →
 - **Add, rename, reorder or remove:** open the task's edit dialog. Under
   **Subtasks**, type into *Add a subtask…* and press **Enter** (or click
   **Add**); edit a subtask's text in place; **↑** moves it up, **×** removes
-  it. Changes take effect when you click **Save**.
+  it. Changes take effect when you click **Save**; text still in *Add a
+  subtask…* is added then too (Cancel drops it).
 - **Check off:** click the counter **▶ 1/3** on the card to unfold the
   checklist (right-click → **Show subtasks** works too), then tick items off
   right there. Click the counter again to fold it away.

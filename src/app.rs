@@ -2145,6 +2145,11 @@ impl PriogatorApp {
         });
 
         if save && !editor.details.title.trim().is_empty() {
+            // A subtask typed but not added yet is meant to be kept.
+            if !editor.new_subtask.trim().is_empty() {
+                let pending = Subtask::new(&std::mem::take(&mut editor.new_subtask));
+                editor.details.subtasks.push(pending);
+            }
             let mut details = editor.details.clone();
             details.deadline = editor.has_deadline.then_some(editor.deadline);
             // Only remember a lead time that differs from the app-wide one.
