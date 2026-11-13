@@ -37,13 +37,15 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 eframe = { version = "0.37.0", default-features = false, features = ["glow"] }
 
 # `cargo deb` (cargo install cargo-deb) builds a Debian/Ubuntu package on Linux:
-# target/debian/priogator_<version>-1_<arch>.deb. Libraries it needs are found
+# target/debian/priogator_<version>_<arch>.deb. Libraries it needs are found
 # by $auto; the rest are opened at run time, so they're listed by hand.
 [package.metadata.deb]
 maintainer = "Andreas Zoglauer"
 copyright = "Andreas Zoglauer"
 license-file = ["LICENSE", "0"]
 section = "utils"
+# No Debian revision ("-1"): every change gets a new version anyway.
+revision = ""
 extended-description = """\
 A personal to-do list with areas (columns), deadlines that move tasks to the \
 top, and easy re-prioritizing. Local only: computers sync through a shared \

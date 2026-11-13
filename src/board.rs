@@ -584,6 +584,22 @@ impl Board {
         }
     }
 
+    /// Put a task first in its area's top section, before those arranged by
+    /// hand and those sorted by deadline (overdue ones too). The others keep
+    /// their places. For a new task due today.
+    pub fn put_first_on_top(&mut self, id: Uuid) {
+        let Some(area) = self.tasks.get(&id).map(|t| t.area) else {
+            return;
+        };
+        let first = self
+            .top_list(area)
+            .iter()
+            .filter(|t| t.meta.id != id)
+            .filter_map(|t| t.top_rank)
+            .fold(0.0, f64::min);
+        self.update_task(id, |t| t.top_rank = Some(first - 1.0));
+    }
+
     /// Move a task into `area`'s priority list at position `index` (0 = top).
     /// Unpins it; a deadline close enough to keep it in the top section is
     /// removed, farther ones stay.
@@ -1394,6 +1410,41 @@ mod tests {
         b.done_days = 14;
         assert_eq!(shown(&b), ["done today", "done 10 days ago"]);
         assert_eq!(b.stats(TODAY).done_recently, 2);
+    }
+
+    #[test]
+    fn put_first_on_top_goes_before_arranged_and_overdue_tasks() {
+        let (mut b, area) = board_with_area("mac");
+        let yesterday = TODAY.yesterday().unwrap();
+        let overdue = b.add_task(area, "overdue", None, Some(yesterday));
+        let pinned = b.add_task(area, "pinned", None, None);
+        b.pin(pinned, area);
+        let arranged = b.add_task(area, "arranged", None, Some(TODAY));
+        b.move_in_top(arranged, area, 0);
+        let titles = |b: &Board| -> Vec<String> {
+            b.top_list(area).iter().map(|t| t.title.clone()).collect()
+        };
+        let before = titles(&b);
+        let stamps: Vec<_> = [overdue, pinned, arranged]
+            .iter()
+            .map(|id| b.tasks[id].meta.updated_at)
+            .collect();
+
+        let new = b.add_task(area, "new", None, Some(TODAY));
+        b.put_first_on_top(new);
+        let after = titles(&b);
+        assert_eq!(after[0], "new");
+        assert_eq!(after[1..], before[..]);
+        // Nobody else was touched (nothing extra to sync).
+        let now: Vec<_> = [overdue, pinned, arranged]
+            .iter()
+            .map(|id| b.tasks[id].meta.updated_at)
+            .collect();
+        assert_eq!(now, stamps);
+        // A second new one goes before the first.
+        let newer = b.add_task(area, "newer", None, Some(TODAY));
+        b.put_first_on_top(newer);
+        assert_eq!(titles(&b)[..2], ["newer", "new"]);
     }
 
     #[test]

@@ -518,6 +518,41 @@ fn a_deadline_moves_the_task_on_top_and_removing_it_moves_it_back() {
 }
 
 #[test]
+fn a_new_task_due_today_goes_first_on_top() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = app(&dir);
+    let work = area(&h, 0);
+    let before = top(&h, work);
+    assert_eq!(before[0], "Send quarterly report", "overdue, first so far");
+    h.get_by_label("+ New task").click();
+    h.run_steps(2);
+    type_text(&mut h, "Call the plumber");
+    deadline_checkbox(&h).click();
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::Role::Button, "Add task").click();
+    h.run_steps(4);
+    assert_eq!(task(&h, "Call the plumber").deadline, Some(today()));
+    let after = top(&h, work);
+    assert_eq!(after[0], "Call the plumber", "{after:?}");
+    assert_eq!(after[1..], before[..], "the others keep their order");
+}
+
+#[test]
+fn an_existing_task_given_todays_deadline_keeps_the_usual_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = app(&dir);
+    trash_out_of_the_way(&mut h);
+    let work = area(&h, 0);
+    open(&mut h, "Read team feedback");
+    deadline_checkbox(&h).click();
+    h.run_steps(2);
+    save(&mut h);
+    // Overdue still comes first; only new tasks jump ahead.
+    assert_eq!(top(&h, work)[0], "Send quarterly report");
+    assert_eq!(task(&h, "Read team feedback").top_rank, None);
+}
+
+#[test]
 fn a_longer_lead_time_brings_a_far_deadline_on_top() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = app(&dir);

@@ -296,7 +296,7 @@ list, commits "Priogator X.Y.Z", tags `vX.Y.Z` and, after asking, pushes.
 Agents don't run it unless asked.
 
 The tag push starts GitHub Actions (`release.yml`): tests on macOS and
-Linux, the universal `Priogator-X.Y.Z.dmg`, and `priogator_X.Y.Z-1_amd64.deb`
+Linux, the universal `Priogator-X.Y.Z.dmg`, and `priogator_X.Y.Z_amd64.deb`
 / `_arm64.deb` (`cargo deb`, metadata in `Cargo.toml`, built in an Ubuntu
 22.04 container so they need only glibc 2.35). A last job attaches them all
 to the release with `.github/release-notes.md`, only if everything passed.

@@ -125,7 +125,8 @@ list. They do nothing while you're typing in a text field.
 The top section shows tasks whose deadline is close: within **10 days** by
 default, or what you set for that task (see below),
 earliest first unless you've arranged them yourself (see *Pinning* below for
-the order). Overdue tasks stay there, marked red.
+the order). Overdue tasks stay there, marked red. A **new** task due today
+goes first, above everything else there, until you move it.
 
 Tasks due further out stay in the priority list and show their date there.
 They move up to the top section by themselves once the deadline is close

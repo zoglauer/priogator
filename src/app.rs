@@ -2164,7 +2164,11 @@ impl PriogatorApp {
                     details.deadline,
                 )
             });
+            let due_today = details.deadline == Some(self.board.today);
             self.board.update_details(id, details);
+            if editor.id.is_none() && due_today {
+                self.board.put_first_on_top(id);
+            }
             self.dirty = true;
             close = true;
         } else if delete && let Some(id) = editor.id {
