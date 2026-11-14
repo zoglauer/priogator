@@ -44,7 +44,11 @@ fi
 
 echo "== Testing"
 cargo fetch --locked --quiet  # all platforms' libraries (license test)
-cargo test --quiet
+# One crate at a time, so the output says which one is tested.
+for crate in priogator priogator-core; do
+    echo "-- $crate"
+    cargo test --quiet -p "$crate"
+done
 cargo clippy --quiet --all-targets -- -D warnings
 scripts/check-test-parity.sh
 
