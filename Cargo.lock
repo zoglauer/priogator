@@ -2684,12 +2684,24 @@ dependencies = [
  "egui_kittest",
  "egui_system_font_provider",
  "fontique",
- "hostname",
  "jiff",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "priogator-core",
  "rfd",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "priogator-core"
+version = "1.0.10"
+dependencies = [
+ "directories",
+ "hostname",
+ "jiff",
  "serde",
  "serde_json",
  "tempfile",

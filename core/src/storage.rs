@@ -89,8 +89,11 @@ fn default_done_days() -> i64 {
     crate::board::DEFAULT_DONE_DAYS
 }
 
+/// The desktop app's area width, until changed in Settings.
+pub const DEFAULT_COLUMN_WIDTH: f32 = 280.0;
+
 fn default_column_width() -> f32 {
-    crate::app::DEFAULT_COLUMN_WIDTH
+    DEFAULT_COLUMN_WIDTH
 }
 
 fn default_backup_dir() -> PathBuf {
@@ -1026,7 +1029,7 @@ mod tests {
             crate::board::DEFAULT_HORIZON_DAYS
         );
         assert_eq!(config.done_days, crate::board::DEFAULT_DONE_DAYS);
-        assert_eq!(config.column_width, crate::app::DEFAULT_COLUMN_WIDTH);
+        assert_eq!(config.column_width, DEFAULT_COLUMN_WIDTH);
         assert!(config.folded_areas.is_empty());
         assert_eq!(config.color_scheme, ColorScheme::Standard);
         assert_eq!(config.due_soon_color, None);

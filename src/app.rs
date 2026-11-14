@@ -12,9 +12,9 @@ use crate::backup::{BackupFile, Backups};
 use crate::board::{Board, TASK_COLORS, TaskDetails};
 use crate::model::{Subtask, TaskItem};
 use crate::repeat::{Repeat, Unit, WEEKDAY_BUTTONS};
-use crate::storage::{ColorScheme, Config, SyncFolder, Waiting, read_board_file};
-
-pub const DEFAULT_COLUMN_WIDTH: f32 = 280.0;
+use crate::storage::{
+    ColorScheme, Config, DEFAULT_COLUMN_WIDTH, SyncFolder, Waiting, read_board_file,
+};
 const COLUMN_WIDTHS: std::ops::RangeInclusive<f32> = 200.0..=600.0;
 /// Width of a folded area.
 const STRIP_WIDTH: f32 = 34.0;

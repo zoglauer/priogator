@@ -60,20 +60,30 @@ After a change the owner will look at, rebuild and reinstall the app:
 
 ## Code layout
 
+A Cargo workspace with two crates, both at the same version (set once in
+`[workspace.package]` of the top `Cargo.toml`):
+
+- `core/` (`priogator-core`, a library): everything about the data, **no
+  UI and no egui**, so other front ends (an iPhone app is planned) read and
+  write the sync files exactly like the desktop app. Keep it that way.
+- the top folder (`priogator`): the desktop app. `main.rs` names the core
+  modules (`use priogator_core::{board, …}`), so UI code writes
+  `crate::board::Board` as before.
+
 | File | What |
 |---|---|
 | `src/main.rs` | startup, window options, `--demo` |
-| `src/model.rs` | data types: `Meta`, `Area`, `TaskGroup`, `TaskItem`, `Subtask` |
-| `src/board.rs` | all tasks in memory: lists, ordering, moves, done/reopen, stats, merge, restore |
-| `src/repeat.rs` | recurring tasks (`Repeat::Schedule` / `AfterDone`), next due date |
-| `src/active.rs` | active hours per area (areas fold outside them) |
-| `src/storage.rs` | `Config` (settings), `SyncFolder` (per-device files), migration from Prioritizer |
-| `src/backup.rs` | daily backups, retention, restore/delete |
+| `core/src/model.rs` | data types: `Meta`, `Area`, `TaskGroup`, `TaskItem`, `Subtask` |
+| `core/src/board.rs` | all tasks in memory: lists, ordering, moves, done/reopen, stats, merge, restore |
+| `core/src/repeat.rs` | recurring tasks (`Repeat::Schedule` / `AfterDone`), next due date |
+| `core/src/active.rs` | active hours per area (areas fold outside them) |
+| `core/src/storage.rs` | `Config` (settings), `SyncFolder` (per-device files), migration from Prioritizer |
+| `core/src/backup.rs` | daily backups, retention, restore/delete |
+| `core/src/demo.rs` | example data |
 | `src/app.rs` | the whole UI, dialogs, and the UI tests (`mod tests` at the end) |
 | `src/fonts.rs`, `src/theme.rs` | system fonts via fontique (bold: a variable font's weight axis, else the family's bold face), macOS label colours, dark mode |
 | `src/licenses.rs` | parses `assets/third-party-licenses.txt` for the About dialog |
 | `src/macos_menu.rs` | macOS app menu "About Priogator" opens our dialog (objc2) |
-| `src/demo.rs` | example data |
 | `HELP.md` | user guide; keep it in sync with every user-visible change |
 | `scripts/` | packaging, `make_icon.py` (draws `assets/icon.png`), `licenses.sh` |
 | `.github/workflows/release.yml` | builds and publishes the DMG on tags `vX.Y.Z` |
@@ -197,11 +207,11 @@ After a change the owner will look at, rebuild and reinstall the app:
 
 ## Tests
 
-~330 tests, all run by `cargo test` in a few seconds (plus the two preview
-renderers, `--ignored`). Every feature gets a test; add one with each change.
+~360 tests, all run by `cargo test` (both crates) in a few seconds (plus
+the two preview renderers, `--ignored`). Every feature gets a test; add one with each change.
 
-- Data: `mod tests` in each module (board, storage, backup, model, repeat,
-  active, demo, licenses).
+- Data: `mod tests` in each module of `core/` (board, storage, backup,
+  model, repeat, active, demo), and licenses.
 - UI, the real app driven like a user: `src/app/ui_tests_tasks.rs` (task
   dialog, cards, menus, keyboard, drag & drop, undo, stats) and
   `src/app/ui_tests_app.rs` (areas, groups, settings, backups, About, menu,
@@ -232,8 +242,10 @@ renderers, `--ignored`). Every feature gets a test; add one with each change.
 ## Dependencies: ship only what's needed
 
 The owner wants as few libraries in the app as possible. Count them with
-`cargo tree -e normal --target aarch64-apple-darwin --prefix none --format '{p}' | sort -u | wc -l`
-(and `--target x86_64-unknown-linux-gnu`); at 1.0 it was 164 / 168.
+`cargo tree -p priogator -e normal --target aarch64-apple-darwin --prefix none --format '{p}' | sed 's/ (\*)//' | sort -u | wc -l`
+(and `--target x86_64-unknown-linux-gnu`); at 1.0.10 it was 165 / 169,
+our own two crates included. `core/` needs only jiff, serde(_json), uuid,
+directories and hostname; keep it that small.
 
 - eframe has `default-features = false`, with only `clipboard`,
   `default_fonts`, `system_fonts`, `wayland`, `x11`. Renderer per platform: `wgpu` (Metal)

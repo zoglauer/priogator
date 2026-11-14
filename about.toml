@@ -20,3 +20,5 @@ accepted = [
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
 ignore-dev-dependencies = true
 ignore-build-dependencies = true
+# Our own crates (publish = false, like core/) aren't third-party libraries.
+private = { ignore = true }

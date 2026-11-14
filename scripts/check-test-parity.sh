@@ -17,7 +17,8 @@ command -v cargo >/dev/null || source "$HOME/.cargo/env"
 libraries() {
     cargo tree --target "$1" -e "$2" -f '{p} [{f}]' --prefix none |
         sed -E 's/ \(\*\)//' |
-        awk '{
+        awk 'NF == 0 { next }  # the blank line between the two crates' trees
+        {
             n = split(substr($0, index($0, "[") + 1), parts, /[],]/)
             kept = ""
             for (i = 1; i <= n; i++) {

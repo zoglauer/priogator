@@ -529,7 +529,8 @@ fn a_new_task_due_today_goes_first_on_top() {
     type_text(&mut h, "Call the plumber");
     deadline_checkbox(&h).click();
     h.run_steps(2);
-    h.get_by_role_and_label(egui::Role::Button, "Add task").click();
+    h.get_by_role_and_label(egui::Role::Button, "Add task")
+        .click();
     h.run_steps(4);
     assert_eq!(task(&h, "Call the plumber").deadline, Some(today()));
     let after = top(&h, work);

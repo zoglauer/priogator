@@ -1,20 +1,16 @@
-mod active;
 mod app;
-mod backup;
-mod board;
-mod demo;
 mod fonts;
 mod licenses;
 #[cfg(target_os = "macos")]
 mod macos_menu;
-mod model;
-mod repeat;
-mod storage;
 mod theme;
 #[cfg(target_os = "macos")]
 mod update;
 
 use eframe::egui;
+// The data side (no UI) lives in core/, shared with other front ends. Named
+// here so the UI code can keep writing `crate::board::Board` and so on.
+use priogator_core::{active, backup, board, demo, model, repeat, storage};
 
 fn main() -> eframe::Result {
     let config = match storage::Config::load_or_create() {

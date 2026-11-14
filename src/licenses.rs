@@ -155,14 +155,17 @@ mod tests {
             let shipped: std::collections::BTreeSet<String> =
                 String::from_utf8_lossy(&output.stdout)
                     .lines()
-                    // "egui v0.37.0", "priogator v1.0.5 (/path)", "x v1.0 (*)"
+                    // "egui v0.37.0", "priogator v1.0.5 (/path)", "x v1.0 (*)",
+                    // "priogator-core v1.0.5 (/path/core)"
                     .filter_map(|line| {
                         let mut parts = line.split_whitespace();
                         let name = parts.next()?;
                         let version = parts.next()?.strip_prefix('v')?;
                         Some(format!("{name} {version}"))
                     })
-                    .filter(|lib| !lib.starts_with("priogator "))
+                    .filter(|lib| {
+                        !lib.starts_with("priogator ") && !lib.starts_with("priogator-core ")
+                    })
                     .collect();
             assert!(shipped.len() > 100, "{target}: {}", shipped.len());
             let missing: Vec<&String> = shipped.iter().filter(|l| !listed.contains(*l)).collect();

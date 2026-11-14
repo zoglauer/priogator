@@ -1,23 +1,37 @@
-[package]
-name = "priogator"
+# The desktop app (this folder) and its data side without UI (core/), which
+# other front ends can share. Both have the same version: scripts/release.sh
+# bumps the one below.
+[workspace]
+members = [".", "core"]
+# `cargo test` / `cargo clippy` at the top cover both.
+default-members = [".", "core"]
+
+[workspace.package]
 version = "1.0.10"
 edition = "2024"
-description = "A priority tracker"
 authors = ["Andreas Zoglauer"]
 license = "Apache-2.0"
 repository = "https://github.com/zoglauer/priogator"
 
+[package]
+name = "priogator"
+version.workspace = true
+edition.workspace = true
+description = "A priority tracker"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
 [dependencies]
+priogator-core = { path = "core" }
 directories = "6.0.0"
 # Only the parts we use; the renderer is chosen per platform below.
 eframe = { version = "0.37.0", default-features = false, features = ["clipboard", "default_fonts", "wayland", "x11"] }
 egui_extras = { version = "0.37.0", default-features = false, features = ["datepicker"] }
 egui_system_font_provider = "0.37.0"
 fontique = { version = "0.11.1", default-features = false, features = ["system", "fontconfig-dlopen"] }
-hostname = "0.4.2"
 jiff = { version = "0.2.38", features = ["serde"] }
 rfd = "0.17.2"
-serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 uuid = { version = "1.29.0", features = ["v4", "serde", "v5"] }
 
