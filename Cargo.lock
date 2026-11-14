@@ -2676,7 +2676,7 @@ checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
 
 [[package]]
 name = "priogator"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "directories",
  "eframe",
@@ -2697,7 +2697,7 @@ dependencies = [
 
 [[package]]
 name = "priogator-core"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "directories",
  "hostname",
